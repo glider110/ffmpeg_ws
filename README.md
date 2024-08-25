@@ -51,3 +51,9 @@ ffmpeg -i output.mp4 -f segment -segment_time 10 -c copy -reset_timestamps 1 out
 
    用coda安装会绑定依赖一起安装 `conda install -c conda-forge moviepy`
 
+
+
+
+资源汇总
+1.stt    
+https://www.csubtitle.com/?gad_source=1&gclid=Cj0KCQjwh7K1BhCZARIsAKOrVqGf147u6j7L2Al3JDVEK2XfrFVXzxFHDv_-G5A_BHFmOpTzBAULlQ4aAuHLEALw_wcB
