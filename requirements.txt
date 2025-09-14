@@ -1,0 +1,14 @@
+beautifulsoup4>=4.12
+requests>=2.32
+selenium>=4.22
+webdriver-manager>=4.0
+moviepy>=1.0.3
+speechrecognition>=3.10.4
+# 避免网络升级 2.x 超时，固定到已验证版本
+fake-useragent==1.4.0
+vosk>=0.3.45
+
+# Whisper (faster-whisper backend)
+faster-whisper>=1.0.3
+
+

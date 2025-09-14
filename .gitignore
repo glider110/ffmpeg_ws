@@ -1,3 +1,5 @@
 sock
 *.mov
 *.mp4
+stt/vosk-model-cn-0.22/
+stt/vosk-model-small-cn-0.22/
