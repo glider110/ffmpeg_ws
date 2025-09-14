@@ -37,6 +37,26 @@ except Exception as e:  # pragma: no cover
         f"导入错误：{e}"
     )
 
+# OpenCC（繁简转换）为可选依赖：opencc-python-reimplemented
+_opencc = None  # 延迟初始化
+_opencc_warned = False
+
+def to_simplified(text: str) -> str:
+    global _opencc, _opencc_warned
+    if not text:
+        return text
+    try:
+        if _opencc is None:
+            from opencc import OpenCC  # type: ignore
+            _opencc = OpenCC("t2s")  # 繁体到简体
+        return _opencc.convert(text)
+    except Exception:
+        # 未安装 opencc 或其他错误时，提示一次后静默
+        if not _opencc_warned:
+            print("[提示] 未安装 opencc-python-reimplemented，无法进行简体转换，已使用原文。")
+            _opencc_warned = True
+        return text
+
 
 def ensure_ffmpeg() -> None:
     if shutil.which("ffmpeg") is None:
@@ -79,6 +99,43 @@ def write_srt(segments: Iterable[Tuple[int, float, float, str]], path: Path) -> 
     path.write_text("\n".join(parts) + "\n", encoding="utf-8")
 
 
+def _maybe_local_model_dir(spec: str) -> Optional[Path]:
+    """若 spec 指向本地目录，则返回该目录 Path，否则返回 None。"""
+    try:
+        p = Path(os.path.expanduser(spec)).resolve()
+    except Exception:
+        return None
+    return p if p.exists() and p.is_dir() else None
+
+
+def _validate_ct2_model_dir(model_dir: Path) -> None:
+    """校验本地 CTranslate2 模型目录是否完整。
+
+    需要文件至少包含：model.bin, config.json, tokenizer.json, vocabulary.txt
+    否则提前给出清晰提示，避免运行到一半才抛出底层错误。
+    """
+    required = [
+        model_dir / "model.bin",
+        model_dir / "config.json",
+        model_dir / "tokenizer.json",
+        model_dir / "vocabulary.txt",
+    ]
+    missing = [str(p.name) for p in required if not p.exists()]
+    if missing:
+        examples = (
+            "1) 将完整的 CTranslate2 模型目录拷贝到此处（包含 model.bin/config.json/tokenizer.json/vocabulary.txt）\n"
+            "2) 或创建软链接指向完整模型目录，例如：\n"
+            "   ln -sfn /path/to/whisper-small-ct2 stt/models/whisper-small\n"
+            "然后使用参数：-m stt/models/whisper-small\n"
+        )
+        raise SystemExit(
+            "检测到本地模型目录不完整：\n"
+            f"- 目录：{model_dir}\n"
+            f"- 缺少：{', '.join(missing)}\n\n"
+            "修复建议：\n" + examples
+        )
+
+
 @dataclass
 class TranscribeResult:
     language: Optional[str]
@@ -96,12 +153,18 @@ def transcribe(
     beam_size: int = 5,
     vad_filter: bool = True,
     word_timestamps: bool = False,
+    zh_simplified: bool = False,
 ) -> Tuple[TranscribeResult, List[Tuple[int, float, float, str]]]:
     """使用 faster-whisper 进行转写。
 
     返回: (总体结果, 片段列表[(idx, start, end, text)])
     """
     ensure_ffmpeg()
+
+    # 若传入的是本地模型目录，先做完整性检查，避免后续底层报错。
+    local_model_dir = _maybe_local_model_dir(model_name_or_path)
+    if local_model_dir is not None:
+        _validate_ct2_model_dir(local_model_dir)
 
     model = WhisperModel(
         model_name_or_path,
@@ -123,6 +186,8 @@ def transcribe(
     srt_segments: List[Tuple[int, float, float, str]] = []
     for i, seg in enumerate(segments, start=1):
         text = (seg.text or "").strip()
+        if zh_simplified:
+            text = to_simplified(text)
         if text:
             texts.append(text)
             srt_segments.append((i, seg.start or 0.0, seg.end or 0.0, text))
@@ -136,11 +201,12 @@ def transcribe(
 
 
 def default_outputs(input_audio: Path) -> Tuple[Path, Path]:
-    """根据输入文件构造默认的 txt/srt 输出路径。放在同一目录，添加 .whisper 后缀。"""
-    parent = input_audio.parent
+    """根据输入文件名构造默认的 txt/srt 输出路径，统一放到脚本目录下的 output 子目录。"""
+    script_dir = Path(__file__).resolve().parent
+    out_dir = script_dir / "output"
     stem = input_audio.stem
-    txt = parent / f"{stem}.whisper.txt"
-    srt = parent / f"{stem}.whisper.srt"
+    txt = out_dir / f"{stem}.whisper.txt"
+    srt = out_dir / f"{stem}.whisper.srt"
     return txt, srt
 
 
@@ -167,6 +233,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--beam-size", type=int, default=5, help="解码 beam 大小")
     p.add_argument("--no-vad", dest="vad", action="store_false", help="关闭 VAD 过滤")
     p.add_argument("--word-timestamps", action="store_true", help="输出词级时间戳（可能更慢）")
+    p.add_argument("--zh-simplified", action="store_true", help="将输出统一为简体（需要 opencc-python-reimplemented）")
     p.set_defaults(vad=True)
 
     out = p.add_argument_group("输出")
@@ -210,6 +277,7 @@ def main() -> None:
         beam_size=args.beam_size,
         vad_filter=args.vad,
         word_timestamps=args.word_timestamps,
+        zh_simplified=args.zh_simplified,
     )
 
     # 写文件
