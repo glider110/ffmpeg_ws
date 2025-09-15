@@ -15,6 +15,50 @@
   - opencc-python-reimplemented（可选，用于简体转换）
 - 系统需安装 ffmpeg（命令可用）
 
+### 1.1) 模型下载方式与地址
+
+Whisper/faster-whisper 支持多种模型（tiny、small、medium、large-v3、large-v3-turbo），首次使用时会自动下载权重。
+
+#### 在线自动下载（推荐）
+- 直接用模型名（如 tiny/medium/small/large-v3），脚本会自动从 Hugging Face 拉取权重。
+- 国内建议配置镜像加速：
+  ```zsh
+  export HF_ENDPOINT=https://hf-mirror.com
+  export HF_HOME=$(pwd)/.hf
+  export HUGGINGFACE_HUB_CACHE=$(pwd)/.hf/hub
+  unset HF_HUB_OFFLINE
+  ```
+- Hugging Face 官方模型主页：
+  - https://huggingface.co/Systran/faster-whisper-tiny
+  - https://huggingface.co/Systran/faster-whisper-small
+  - https://huggingface.co/Systran/faster-whisper-medium
+  - https://huggingface.co/Systran/faster-whisper-large-v3
+  - https://huggingface.co/Systran/faster-whisper-large-v3-turbo
+
+#### 离线下载与拷贝（无网环境）
+- 在可联网机器访问上述 Hugging Face 地址，下载 CTranslate2 格式权重（包含 model.bin/config.json/tokenizer.json/vocabulary.txt）。
+- 下载后将整个模型目录拷贝到本机，例如：
+  - stt/models/whisper-tiny
+  - stt/models/whisper-medium
+  - stt/models/whisper-large-v3
+- 软链接方式：
+  ```zsh
+  ln -sfn /path/to/whisper-medium-ct2 stt/models/whisper-medium
+  ```
+- 使用本地模型目录运行：
+  ```zsh
+  conda run --name ffmpeg_ws-py38 \
+    python stt/stt_whisper.py \
+    -i stt/input/1.mp3 \
+    -m stt/models/whisper-medium \
+    --device cpu --compute-type int8 \
+    --task transcribe --zh-simplified --print
+  ```
+
+#### 其他说明
+- CTranslate2 权重目录必须包含 model.bin、config.json、tokenizer.json、vocabulary.txt 四个文件。
+- 若本地模型目录不完整，脚本会直接报错并提示修复建议。
+
 建议国内镜像与本地缓存（减少模型下载卡顿）：
 ```zsh
 export HF_ENDPOINT=https://hf-mirror.com
@@ -37,6 +81,15 @@ conda run --name ffmpeg_ws-py38 \
   -m /home/std/project/ffmpeg_ws/.hf/hub/models--Systran--faster-whisper-tiny/snapshots/d90ca5fe260221311c53c58e660288d3deb8d356 \
   --device cpu --compute-type int8 \
   --task transcribe --zh-simplified --print
+
+
+conda run --name ffmpeg_ws-py38 \
+  python stt/stt_whisper.py \
+  -i stt/input/1.mp3 \
+  -m /home/std/project/ffmpeg_ws/.hf/hub/models--Systran--faster-whisper-medium/snapshots/08e178d48790749d25932bbc082711ddcfdfbc4f\
+  --device cpu --compute-type int8 \
+  --task transcribe --zh-simplified --print
+
 ```
 
 从 stt 目录运行：
