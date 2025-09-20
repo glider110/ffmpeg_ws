@@ -6,3 +6,7 @@ stt/vosk-model-small-cn-0.22/
 .hf/hub/
 .hf/
 .wheels_py38/
+video_clips/output/
+video_clips/modules/__pycache__/
+**/__pycache__/*
+__pycache__/
