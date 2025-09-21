@@ -5,6 +5,8 @@ Video Clips 主界面（PySimpleGUIQt 版）
 """
 from typing import List, Optional, Dict
 import os
+import sys
+import subprocess
 import threading
 import traceback
 import queue
@@ -169,9 +171,86 @@ class QtVideoClipsApp:
             [sg.Multiline(size=(90, 12), key='-LOG-', autoscroll=True, disabled=True, background_color='white', text_color='#222')],
         ]
 
-        layout = [[sg.Column(left_col, background_color=bg), sg.Column(right_col, background_color=bg)]]
+        # 菜单栏定义（类似 Tk 界面）
+        menu_def = [
+            ['文件', ['选择视频文件', '选择文件夹', '---', '清空文件列表', '---', '退出']],
+            ['工具', ['清理临时文件', '打开输出目录', '视频信息分析', '---', '打开收藏文件窗口']],
+            ['帮助', ['使用说明', '关于']],
+        ]
+
+        layout = [
+            [sg.Menu(menu_def, key='-MENU-', background_color=bg)],
+            [sg.Column(left_col, background_color=bg), sg.Column(right_col, background_color=bg)]
+        ]
 
         return sg.Window('视频剪辑工具（PySimpleGUIQt）', layout, finalize=True, font=base_font, background_color=bg)
+
+    # ---------- 菜单动作 ----------
+    def _cleanup_temp(self):
+        try:
+            temp_dir = getattr(self.settings, 'TEMP_DIR', None)
+            if not temp_dir or not os.path.isdir(temp_dir):
+                sg.popup('未找到临时目录', temp_dir or '', title='清理临时文件')
+                return
+            removed = 0
+            for root, dirs, files in os.walk(temp_dir):
+                for f in files:
+                    try:
+                        os.remove(os.path.join(root, f))
+                        removed += 1
+                    except Exception:
+                        pass
+            self._log(f'已清理临时文件 {removed} 个（目录: {temp_dir}）')
+            sg.popup('清理完成', f'已删除 {removed} 个临时文件', title='清理临时文件')
+        except Exception as e:
+            sg.popup('清理失败', str(e), title='清理临时文件')
+
+    def _open_output_dir(self):
+        path = getattr(self.settings, 'OUTPUT_DIR', None)
+        if not path:
+            sg.popup('未配置输出目录', title='打开输出目录')
+            return
+        try:
+            if sys.platform.startswith('linux'):
+                subprocess.Popen(['xdg-open', path])
+            elif sys.platform == 'darwin':
+                subprocess.Popen(['open', path])
+            elif os.name == 'nt':
+                os.startfile(path)  # type: ignore
+            else:
+                sg.popup('当前平台不支持自动打开，请手动前往：', path)
+        except Exception as e:
+            sg.popup('打开失败', f'{path}\n{e}', title='打开输出目录')
+
+    def _analyze_videos(self):
+        if not self.file_items:
+            sg.popup('暂无文件', '请先添加视频文件', title='视频信息分析')
+            return
+        lines = []
+        for it in self.file_items:
+            lines.append(f"{it['name']} | {it['duration_str']} | {it['resolution']} | {it['size_str']}")
+        sg.popup_scrolled('\n'.join(lines), title='视频信息（文件名 | 时长 | 分辨率 | 大小）', size=(70, 20))
+
+    def _open_fav_window(self):
+        data = [[it['name'], it['duration_str'], it['size_str'], it['resolution'], it['format']] for it in self.fav_items] or [["", "", "", "", ""]]
+        layout = [
+            [sg.Table(values=data, headings=['文件名', '时长', '大小', '分辨率', '格式'],
+                      auto_size_columns=False, col_widths=[20, 8, 10, 10, 8],
+                      justification='left', num_rows=12, background_color='white', text_color='#222')],
+            [sg.Button('关闭')]
+        ]
+        win = sg.Window('收藏文件列表', layout, modal=True)
+        while True:
+            ev, _ = win.read()
+            if ev in (sg.WIN_CLOSED, '关闭'):
+                break
+        win.close()
+
+    def _show_help_popup(self):
+        sg.popup('使用说明', '1. 左侧添加视频文件\n2. 右侧选择功能并设置参数\n3. 点击对应按钮开始处理\n4. 日志与进度在下方显示', title='使用说明', keep_on_top=True)
+
+    def _show_about_popup(self):
+        sg.popup('关于', '视频剪辑工具 (Qt 版 GUI)\n基于 PySimpleGUIQt + MoviePy', title='关于', keep_on_top=True)
 
     # ---------- 通用 ----------
     def _log(self, text: str):
@@ -573,6 +652,34 @@ class QtVideoClipsApp:
             event, values = self.window.read(timeout=200)
             if event in (sg.WIN_CLOSED, 'Exit'):
                 break
+
+            # 菜单事件映射到现有操作
+            if event == '选择视频文件':
+                event = '-ADD-FILES-'
+            elif event == '选择文件夹':
+                event = '-ADD-FOLDER-'
+            elif event == '清空文件列表':
+                event = '-CLEAR-'
+            elif event == '退出':
+                break
+            elif event == '清理临时文件':
+                self._cleanup_temp()
+                continue
+            elif event == '打开输出目录':
+                self._open_output_dir()
+                continue
+            elif event == '视频信息分析':
+                self._analyze_videos()
+                continue
+            elif event == '打开收藏文件窗口':
+                self._open_fav_window()
+                continue
+            elif event == '使用说明':
+                self._show_help_popup()
+                continue
+            elif event == '关于':
+                self._show_about_popup()
+                continue
 
             # 文件与收藏
             if event == '-ADD-FILES-':
