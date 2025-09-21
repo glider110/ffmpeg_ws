@@ -17,3 +17,8 @@ tokenizers==0.13.3
 opencc-python-reimplemented>=0.1.7
 
 
+# GUI (Qt)
+PySimpleGUIQt>=0.35.0
+PyQt5>=5.15
+
+

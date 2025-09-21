@@ -1,4 +1,770 @@
 """
+Video Clips 主界面（PySimpleGUIQt 版）
+实现五个剪辑任务 + 文件列表 + 收藏/清除收藏。
+剪辑逻辑完全复用现有 modules，不做修改。
+"""
+from typing import List, Optional, Dict
+import os
+import threading
+import traceback
+import queue
+from queue import Queue
+
+import PySimpleGUIQt as sg
+
+from config.settings import Settings
+from modules.frame_extractor import FrameExtractor
+from modules.video_splitter import VideoSplitter
+from modules.grid_composer import GridComposer
+from modules.duration_composer import DurationComposer
+from modules.audio_mixer import AudioMixer
+from modules.sliding_strip_composer import SlidingStripComposer
+from utils.video_utils import VideoUtils
+
+
+class QtVideoClipsApp:
+    def __init__(self):
+        self.settings = Settings()
+        self.settings.ensure_dirs()
+
+        # 收藏集合
+        self.favorites = set()
+
+        # 后台任务
+        self.worker_thread: Optional[threading.Thread] = None
+        self.cancel_flag = threading.Event()
+        self._queue: Queue = Queue()
+
+        # 业务模块
+        self.extractor = FrameExtractor()
+        self.splitter = VideoSplitter()
+        self.gridder = GridComposer()
+        self.dcomposer = DurationComposer()
+        self.mixer = AudioMixer()
+        self.vutils = VideoUtils()
+        self.scomposer = SlidingStripComposer()
+
+        # 文件/收藏数据（用于 Table 展示）
+        # 每项: { path, name, duration_s, duration_str, size, size_str, resolution, format }
+        self.file_items: List[Dict] = []
+        self.fav_items: List[Dict] = []
+
+        self.window = self._build_window()
+        # 初始化滑块数值标签
+        try:
+            self._init_slider_labels()
+        except Exception:
+            pass
+
+    # ---------- UI ----------
+    def _build_window(self) -> sg.Window:
+        # 使用浅色主题并统一背景色，避免在 Qt 后端出现黑底
+        sg.theme('LightGrey1')
+        base_font = ("Noto Sans CJK SC", max(11, getattr(self.settings, 'BASE_FONT_SIZE', 11)))
+        bg = '#f6f6f6'
+        try:
+            sg.set_options(background_color=bg)
+        except Exception:
+            pass
+
+        # 左侧：文件 + 收藏
+        left_col = [
+            [sg.Text('文件列表', font=base_font)],
+            [
+                sg.Button('添加文件', key='-ADD-FILES-'),
+                sg.Button('添加文件夹', key='-ADD-FOLDER-'),
+                sg.Button('删除选中', key='-DEL-'),
+                sg.Button('清空', key='-CLEAR-'),
+            ],
+            [sg.Table(values=[["", "", "", "", ""]], headings=['文件名', '时长', '大小', '分辨率', '格式'],
+                      key='-FILE-TABLE-',
+                      auto_size_columns=False,
+                      col_widths=[20, 8, 10, 10, 8],
+                      justification='left',
+                      select_mode=sg.TABLE_SELECT_MODE_EXTENDED,
+                      num_rows=12, font=base_font,
+                      background_color='white', text_color='#222')],
+            [sg.Text('收藏列表', font=base_font)],
+            [
+                sg.Button('收藏选中', key='-FAV-ADD-'),
+                sg.Button('取消收藏', key='-FAV-DEL-'),
+                sg.Button('清空收藏', key='-FAV-CLEAR-'),
+            ],
+            [sg.Table(values=[["", "", "", "", ""]], headings=['文件名', '时长', '大小', '分辨率', '格式'],
+                      key='-FAV-TABLE-',
+                      auto_size_columns=False,
+                      col_widths=[20, 8, 10, 10, 8],
+                      justification='left',
+                      select_mode=sg.TABLE_SELECT_MODE_EXTENDED,
+                      num_rows=8, font=base_font,
+                      background_color='white', text_color='#222')],
+        ]
+
+        # Tabs 右侧
+        tab_extract = [
+            [sg.Text('抽帧间隔(秒)'), 
+             sg.Slider((1, 20), default_value=self.settings.DEFAULT_FRAME_INTERVAL, resolution=1, orientation='h', key='-EX-INTERVAL-', size=(30, 20), enable_events=True), 
+             sg.Text(f"{self.settings.DEFAULT_FRAME_INTERVAL:.0f} 秒", key='-EX-INTERVAL-L-')],
+            [sg.Text('图片格式'), sg.Combo(['png', 'jpg'], default_value='png', key='-EX-FORMAT-', readonly=True),
+             sg.Text('方法'), sg.Combo(['auto', 'ffmpeg', 'moviepy', 'cv2'], default_value='ffmpeg', key='-EX-METHOD-', readonly=True)],
+            [sg.Text('输出目录'), sg.Input(os.path.join(self.settings.OUTPUT_DIR, 'frames'), key='-EX-OUT-', size=(38, 1)), sg.Button('选择', key='-EX-OUT-SEL-')],
+            [sg.Button('开始抽帧', key='-RUN-EXTRACT-')]
+        ]
+
+        tab_split = [
+            [sg.Text('每段时长(秒)'), sg.Slider((3, 60), default_value=self.settings.DEFAULT_SEGMENT_DURATION, resolution=1, orientation='h', key='-SP-DUR-', size=(30, 20), enable_events=True), sg.Text('', key='-SP-DUR-L-')],
+            [sg.Text('方法'), sg.Combo(['equal', 'random'], default_value='ffmpeg', key='-SP-METHOD-', readonly=True),
+             sg.Text('重叠(秒)'), sg.Input('0.0', key='-SP-OVER-', size=(6, 1))],
+            [sg.Text('随机: 数量'), sg.Input('8', key='-SP-R-N-', size=(6, 1)), sg.Text('最小秒'), sg.Input('5', key='-SP-R-MIN-', size=(6, 1)), sg.Text('最大秒'), sg.Input('10', key='-SP-R-MAX-', size=(6, 1))],
+            [sg.Text('输出目录'), sg.Input(os.path.join(self.settings.OUTPUT_DIR, 'segments'), key='-SP-OUT-', size=(38, 1)), sg.Button('选择', key='-SP-OUT-SEL-')],
+            [sg.Button('开始切割', key='-RUN-SPLIT-')]
+        ]
+
+        tab_grid = [
+            [sg.Text('布局'), sg.Combo(list(self.settings.GRID_LAYOUTS.keys()), default_value='2×2', key='-GD-LAYOUT-', readonly=True),
+             sg.Text('方法'), sg.Combo(['moviepy', 'ffmpeg'], default_value='moviepy', key='-GD-METHOD-', readonly=True)],
+            [sg.Text('目标时长(秒，可留空)'), sg.Input('', key='-GD-DUR-', size=(10, 1)), sg.Checkbox('同步裁剪到最短', key='-GD-SYNC-', default=True)],
+            [sg.Text('输出尺寸(WxH)'), sg.Input('1920x1080', key='-GD-SIZE-', size=(12, 1))],
+            [sg.Text('输出文件'), sg.Input(os.path.join(self.settings.OUTPUT_DIR, 'grid_videos', 'grid_2x2.mp4'), key='-GD-OUT-', size=(38, 1)), sg.Button('选择', key='-GD-OUT-SEL-')],
+            [sg.Button('创建宫格视频', key='-RUN-GRID-')]
+        ]
+
+        tab_duration = [
+            [sg.Text('目标时长(秒)'), sg.Combo([10, 15, 20, 30, 60], default_value=15, key='-DU-DUR-', readonly=False)],
+            [sg.Text('选择策略'), sg.Combo(['random', 'balanced', 'shortest', 'longest'], default_value='random', key='-DU-STRAT-', readonly=True)],
+            [sg.Text('转场类型'), sg.Combo(['crossfade', 'fade', 'cut'], default_value='crossfade', key='-DU-TRAN-', readonly=True),
+             sg.Text('转场秒'), sg.Input('0.5', key='-DU-TRAN-S-', size=(6, 1)), sg.Checkbox('精确裁剪', key='-DU-EXACT-', default=True)],
+            [sg.Text('输出文件'), sg.Input(os.path.join(self.settings.OUTPUT_DIR, 'duration_videos', 'composed_15s.mp4'), key='-DU-OUT-', size=(38, 1)), sg.Button('选择', key='-DU-OUT-SEL-')],
+            [sg.Button('开始组合', key='-RUN-DURATION-')]
+        ]
+
+        tab_audio = [
+            [sg.Text('方法'), sg.Combo(['moviepy', 'ffmpeg'], default_value='moviepy', key='-AU-METHOD-', readonly=True)],
+            [sg.Text('音乐音量'), sg.Input('0.3', key='-AU-MVOL-', size=(6, 1))],
+            [sg.Text('视频音量'), sg.Input('0.7', key='-AU-VVOL-', size=(6, 1))],
+            [sg.Text('淡入(秒)'), sg.Input('1.0', key='-AU-FIN-', size=(6, 1)), sg.Text('淡出(秒)'), sg.Input('1.0', key='-AU-FOUT-', size=(6, 1)), sg.Text('音乐偏移(秒)'), sg.Input('0', key='-AU-OFF-', size=(6, 1))],
+            [sg.Text('音乐文件(可选)'), sg.Input('', key='-AU-MUSIC-', size=(38, 1)), sg.Button('选择', key='-AU-MUSIC-SEL-')],
+            [sg.Checkbox('对每个选择视频批量处理', key='-AU-BATCH-', default=True)],
+            [sg.Button('开始配音', key='-RUN-AUDIO-')]
+        ]
+
+        tab_sliding = [
+            [sg.Text('输出尺寸(WxH)'), sg.Input('1920x1080', key='-SLI-SIZE-', size=(12, 1))],
+            [sg.Text('转场Δt(秒)'), sg.Input('0.4', key='-SLI-DELTA-', size=(6, 1))],
+            [sg.Text('输出文件'), sg.Input(os.path.join(self.settings.OUTPUT_DIR, 'sliding_1x3.mp4'), key='-SLI-OUT-', size=(38, 1)), sg.Button('选择', key='-SLI-OUT-SEL-')],
+            [sg.Button('开始滑动合成', key='-RUN-SLIDING-')]
+        ]
+
+        right_col = [
+            [sg.TabGroup([[
+                sg.Tab('抽帧', tab_extract, background_color=bg),
+                sg.Tab('切割', tab_split, background_color=bg),
+                sg.Tab('宫格', tab_grid, background_color=bg),
+                sg.Tab('时长', tab_duration, background_color=bg),
+                sg.Tab('配音', tab_audio, background_color=bg),
+                sg.Tab('1x3滑动', tab_sliding, background_color=bg),
+            ]], key='-TABS-', background_color=bg)],
+            [sg.ProgressBar(100, orientation='h', size=(45, 20), key='-PROG-', bar_color=('blue', '#e6e6e6')),
+             sg.Button('停止', key='-STOP-')],
+            [sg.Multiline(size=(90, 12), key='-LOG-', autoscroll=True, disabled=True, background_color='white', text_color='#222')],
+        ]
+
+        layout = [[sg.Column(left_col, background_color=bg), sg.Column(right_col, background_color=bg)]]
+
+        return sg.Window('视频剪辑工具（PySimpleGUIQt）', layout, finalize=True, font=base_font, background_color=bg)
+
+    # ---------- 通用 ----------
+    def _log(self, text: str):
+        if threading.current_thread() is not threading.main_thread():
+            # 在线程中，将日志推送到队列，由主线程消费
+            try:
+                self._queue.put((
+                    'log', text
+                ))
+                return
+            except Exception:
+                pass
+        try:
+            self.window['-LOG-'].print(text)
+        except Exception:
+            prev = self.window['-LOG-'].get()
+            self.window['-LOG-'].update(prev + text + '\n')
+
+    def _set_progress(self, value: float, message: str = ''):
+        value = max(0, min(100, int(value)))
+        self.window['-PROG-'].update(value)
+        if message:
+            self._log(message)
+
+    def _init_slider_labels(self):
+        # 初始化分段时长与抽帧间隔滑块的显示
+        try:
+            val = float(self.window['-SP-DUR-'].get())
+        except Exception:
+            val = float(getattr(self.settings, 'DEFAULT_SEGMENT_DURATION', 8))
+        try:
+            self.window['-SP-DUR-L-'].update(f"{val:.0f}")
+        except Exception:
+            pass
+        # 抽帧间隔
+        try:
+            ex_val = float(self.window['-EX-INTERVAL-'].get())
+        except Exception:
+            ex_val = float(getattr(self.settings, 'DEFAULT_FRAME_INTERVAL', 1.0))
+        try:
+            self.window['-EX-INTERVAL-L-'].update(f"{ex_val:.0f} 秒")
+        except Exception:
+            pass
+
+    def _progress_callback_factory(self, prefix=''):
+        def cb(percent, message):
+            # 通过队列传递进度
+            try:
+                self._queue.put(('progress', (percent, f"{prefix}{message}")))
+            except Exception:
+                pass
+        return cb
+
+    def _get_selected_files(self, values: Optional[dict] = None) -> List[str]:
+        """获取当前选择的文件（兼容 PySimpleGUI 与 PySimpleGUIQt）。
+        优先使用文件列表选中；否则使用收藏选中；都没有则返回全部文件列表。
+        """
+        def rows_to_paths(rows: List[int], items: List[Dict]) -> List[str]:
+            paths: List[str] = []
+            for idx in rows:
+                if 0 <= idx < len(items):
+                    paths.append(items[idx]['path'])
+            return paths
+
+        if values is None:
+            return [it['path'] for it in self.file_items]
+
+        file_sel_rows = values.get('-FILE-TABLE-', []) or []
+        fav_sel_rows = values.get('-FAV-TABLE-', []) or []
+
+        paths = rows_to_paths(file_sel_rows, self.file_items)
+        if not paths:
+            paths = rows_to_paths(fav_sel_rows, self.fav_items)
+        if not paths:
+            paths = [it['path'] for it in self.file_items]
+        return paths
+
+    # ---------- 文件表与收藏表 辅助 ----------
+    def _format_seconds(self, sec: float) -> str:
+        try:
+            sec = float(sec)
+        except Exception:
+            return '--:--'
+        if sec <= 0:
+            return '--:--'
+        h = int(sec // 3600)
+        m = int((sec % 3600) // 60)
+        s = int(sec % 60)
+        if h > 0:
+            return f"{h:02d}:{m:02d}:{s:02d}"
+        else:
+            return f"{m:02d}:{s:02d}"
+
+    def _gather_info(self, path: str) -> Dict:
+        info = self.vutils.get_video_info(path) or {}
+        name = os.path.basename(path)
+        size = os.path.getsize(path) if os.path.exists(path) else 0
+        size_str = self._format_file_size(size)
+        duration = float(info.get('duration', 0.0)) if info else 0.0
+        duration_str = self._format_seconds(duration)
+        if info and 'video' in info:
+            w = info['video'].get('width', 0)
+            h = info['video'].get('height', 0)
+        else:
+            w = h = 0
+        resolution = f"{w}x{h}" if w and h else '-'
+        fmt = info.get('format_name') if info else None
+        if not fmt:
+            fmt = os.path.splitext(name)[1].lstrip('.').lower() or '-'
+        return {
+            'path': path,
+            'name': name,
+            'size': size,
+            'size_str': size_str,
+            'duration_s': duration,
+            'duration_str': duration_str,
+            'resolution': resolution,
+            'format': fmt,
+        }
+
+    def _format_file_size(self, size_bytes: int) -> str:
+        if size_bytes <= 0:
+            return '0 B'
+        units = ['B', 'KB', 'MB', 'GB', 'TB']
+        i = 0
+        size = float(size_bytes)
+        while size >= 1024 and i < len(units) - 1:
+            size /= 1024
+            i += 1
+        return f"{size:.1f} {units[i]}"
+
+    def _refresh_file_table(self):
+        values = [[it['name'], it['duration_str'], it['size_str'], it['resolution'], it['format']] for it in self.file_items]
+        if not values:
+            values = [["", "", "", "", ""]]
+        self.window['-FILE-TABLE-'].update(values)
+
+    def _refresh_fav_table(self):
+        values = [[it['name'], it['duration_str'], it['size_str'], it['resolution'], it['format']] for it in self.fav_items]
+        if not values:
+            values = [["", "", "", "", ""]]
+        self.window['-FAV-TABLE-'].update(values)
+
+    # ---------- 任务 ----------
+    def run_extract(self, values):
+        files = self._get_selected_files(values)
+        if not files:
+            self._log('请选择至少一个视频文件用于抽帧')
+            return
+        interval = float(values['-EX-INTERVAL-'] or 1.0)
+        fmt = values['-EX-FORMAT-']
+        method = values['-EX-METHOD-']
+        outdir_root = values['-EX-OUT-']
+
+        def work():
+            try:
+                for fp in files:
+                    if self.cancel_flag.is_set():
+                        break
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    outdir = os.path.join(outdir_root, name)
+                    os.makedirs(outdir, exist_ok=True)
+                    self._log(f'抽帧: {fp} -> {outdir}')
+                    result = self.extractor.extract_frames(
+                        video_path=fp,
+                        output_dir=outdir,
+                        interval=interval,
+                        image_format=fmt,
+                        method=method,
+                        progress_callback=self._progress_callback_factory(f"[{name}] ")
+                    )
+                    self._queue.put(('log', f'完成抽帧 {len(result)} 张: {name}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    def run_split(self, values):
+        files = self._get_selected_files(values)
+        if not files:
+            self._log('请选择至少一个视频文件用于切割')
+            return
+        seg_dur = float(values['-SP-DUR-'])
+        method = values['-SP-METHOD-']
+        try:
+            overlap = float(values['-SP-OVER-'] or 0.0)
+        except Exception:
+            overlap = 0.0
+        outdir_root = values['-SP-OUT-']
+        r_n = int(values['-SP-R-N-'] or 8)
+        r_min = float(values['-SP-R-MIN-'] or 5)
+        r_max = float(values['-SP-R-MAX-'] or 10)
+
+        def work():
+            try:
+                for fp in files:
+                    if self.cancel_flag.is_set():
+                        break
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    outdir = os.path.join(outdir_root, name)
+                    os.makedirs(outdir, exist_ok=True)
+                    self._log(f'切割: {fp} -> {outdir} ({method})')
+                    if method == 'ffmpeg':
+                        result = self.splitter.split_video_ffmpeg(fp, segment_duration=seg_dur, overlap=overlap, output_dir=outdir)
+                    elif method == 'random':
+                        result = self.splitter.split_video_random(fp, num_segments=r_n, min_duration=r_min, max_duration=r_max, output_dir=outdir, progress_callback=self._progress_callback_factory(f"[{name}] "))
+                    else:
+                        result = self.splitter.split_video_equal(fp, segment_duration=seg_dur, output_dir=outdir, overlap=overlap, progress_callback=self._progress_callback_factory(f"[{name}] "))
+                    self._queue.put(('log', f'完成切割 {len(result)} 段: {name}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    def run_grid(self, values):
+        files = self._get_selected_files(values)
+        if len(files) < 2:
+            self._log('请选择至少两个视频用于宫格组合')
+            return
+        layout = values['-GD-LAYOUT-']
+        method = values['-GD-METHOD-']
+        dur_text = values['-GD-DUR-'].strip()
+        duration = float(dur_text) if dur_text else None
+        sync = bool(values['-GD-SYNC-'])
+        size_text = values['-GD-SIZE-']
+        try:
+            w, h = map(int, size_text.lower().replace('x', ' ').split())
+            target_size = (w, h)
+        except Exception:
+            target_size = (1920, 1080)
+        out_file = values['-GD-OUT-']
+
+        def work():
+            try:
+                self._log(f'宫格: {layout}, {method}, 输出: {out_file}')
+                if method == 'ffmpeg':
+                    result = self.gridder.create_grid_ffmpeg(files, layout=layout, output_path=out_file, duration=duration)
+                else:
+                    result = self.gridder.create_grid_moviepy(files, layout=layout, output_path=out_file, duration=duration, sync=sync, target_size=target_size, progress_callback=self._progress_callback_factory('[grid] '))
+                self._queue.put(('log', f'宫格创建成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    def run_duration(self, values):
+        files = self._get_selected_files(values)
+        if len(files) < 1:
+            self._log('请选择至少一个视频片段用于时长组合')
+            return
+        target = float(values['-DU-DUR-'])
+        strategy = values['-DU-STRAT-']
+        tran = values['-DU-TRAN-']
+        tran_s = float(values['-DU-TRAN-S-'] or 0.5)
+        exact = bool(values['-DU-EXACT-'])
+        out_file = values['-DU-OUT-']
+
+        def work():
+            try:
+                self._log(f'时长组合: {target}s, {strategy}, {tran} -> {out_file}')
+                result = self.dcomposer.compose_duration_video(
+                    video_paths=files,
+                    target_duration=target,
+                    output_path=out_file,
+                    strategy=strategy,
+                    transition_type=tran,
+                    transition_duration=tran_s,
+                    trim_to_exact=exact,
+                    progress_callback=self._progress_callback_factory('[duration] ')
+                )
+                self._queue.put(('log', f'时长组合成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    def run_audio(self, values):
+        files = self._get_selected_files(values)
+        if len(files) < 1:
+            self._log('请选择至少一个视频用于配音')
+            return
+        method = values['-AU-METHOD-']
+        try:
+            mvol = float(values['-AU-MVOL-'] or 0.3)
+        except Exception:
+            mvol = 0.3
+        try:
+            vvol = float(values['-AU-VVOL-'] or 0.7)
+        except Exception:
+            vvol = 0.7
+        fin = float(values['-AU-FIN-'] or 1.0)
+        fout = float(values['-AU-FOUT-'] or 1.0)
+        offset = float(values['-AU-OFF-'] or 0)
+        music_file = values['-AU-MUSIC-'].strip() or None
+        batch = bool(values['-AU-BATCH-'])
+
+        def work():
+            try:
+                if batch and len(files) > 1 and music_file is None:
+                    self._log('批量配音：将为每个视频选择音乐')
+                    results = self.mixer.batch_add_music(
+                        video_paths=files,
+                        music_volume=mvol,
+                        video_volume=vvol,
+                        unique_music=True,
+                        progress_callback=self._progress_callback_factory('[batch-audio] ')
+                    )
+                    self._queue.put(('log', f'批量配音完成: {len(results)} 个输出'))
+                else:
+                    for fp in files:
+                        if self.cancel_flag.is_set():
+                            break
+                        self._log(f'为 {os.path.basename(fp)} 添加音乐...')
+                        if method == 'ffmpeg':
+                            out_path = self.mixer.add_music_to_video_ffmpeg(
+                                video_path=fp,
+                                music_path=music_file,
+                                music_volume=mvol,
+                                video_volume=vvol,
+                                fade_duration=max(fin, fout),
+                                music_start_offset=offset
+                            )
+                        else:
+                            out_path = self.mixer.add_music_to_video_moviepy(
+                                video_path=fp,
+                                music_path=music_file,
+                                music_volume=mvol,
+                                video_volume=vvol,
+                                fade_in_duration=fin,
+                                fade_out_duration=fout,
+                                music_start_offset=offset,
+                                progress_callback=self._progress_callback_factory('[audio] ')
+                            )
+                        self._queue.put(('log', f'完成：{out_path}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    def run_sliding(self, values):
+        files = self._get_selected_files(values)
+        if len(files) < 1:
+            self._log('请选择至少一个视频用于 1x3 滑动合成')
+            return
+        size_text = (values.get('-SLI-SIZE-') or '1920x1080').strip()
+        try:
+            w, h = map(int, size_text.lower().replace('x', ' ').split())
+            target_size = (w, h)
+        except Exception:
+            target_size = (1920, 1080)
+        # slider 直接是 float
+        try:
+            delta = float(values.get('-SLI-DELTA-', 0.4) or 0.4)
+        except Exception:
+            delta = 0.4
+        out_file = values.get('-SLI-OUT-') or os.path.join(self.settings.OUTPUT_DIR, 'sliding_1x3.mp4')
+
+        def work():
+            try:
+                self._log(f'1x3滑动合成: 输出 {out_file}, 尺寸 {target_size}, Δt={delta}s')
+                result = self.scomposer.compose_1x3_sliding(
+                    video_paths=files,
+                    output_path=out_file,
+                    output_size=target_size,
+                    transition_duration=delta,
+                    progress_callback=self._progress_callback_factory('[sliding] ')
+                )
+                self._queue.put(('log', f'滑动合成成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
+
+    # ---------- 线程 ----------
+    def _start_worker(self, target):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self._log('已有任务在执行中，请先停止或等待完成')
+            return
+        self.cancel_flag.clear()
+        self._set_progress(0)
+        self.window['-LOG-'].update('')
+        self.worker_thread = threading.Thread(target=target, daemon=True)
+        self.worker_thread.start()
+
+    def _stop_worker(self):
+        if self.worker_thread and self.worker_thread.is_alive():
+            self.cancel_flag.set()
+            self._log('请求停止任务，可能需要等待当前操作完成...')
+
+    # ---------- 事件循环 ----------
+    def run(self):
+        while True:
+            event, values = self.window.read(timeout=200)
+            if event in (sg.WIN_CLOSED, 'Exit'):
+                break
+
+            # 文件与收藏
+            if event == '-ADD-FILES-':
+                try:
+                    paths = sg.popup_get_file('选择文件（可多选）', multiple_files=True, no_window=True)
+                except TypeError:
+                    paths = sg.popup_get_file('选择文件', no_window=True)
+                if paths:
+                    if isinstance(paths, (list, tuple)):
+                        candidates = list(paths)
+                    else:
+                        candidates = [p for p in str(paths).split(';')]
+                    for p in candidates:
+                        if p and os.path.isfile(p):
+                            if all(it['path'] != p for it in self.file_items):
+                                try:
+                                    self.file_items.append(self._gather_info(p))
+                                except Exception:
+                                    self.file_items.append(self._gather_info(p))
+                    self._refresh_file_table()
+
+            elif event == '-ADD-FOLDER-':
+                try:
+                    folder = sg.popup_get_folder('选择文件夹', no_window=True)
+                except TypeError:
+                    folder = sg.popup_get_folder('选择文件夹')
+                if folder and os.path.isdir(folder):
+                    for root, _, files in os.walk(folder):
+                        for f in files:
+                            if any(f.lower().endswith(ext) for ext in self.settings.SUPPORTED_VIDEO_FORMATS):
+                                p = os.path.join(root, f)
+                                if all(it['path'] != p for it in self.file_items):
+                                    self.file_items.append(self._gather_info(p))
+                    self._refresh_file_table()
+
+            elif event == '-DEL-':
+                sel_rows: List[int] = values.get('-FILE-TABLE-', []) or []
+                if sel_rows:
+                    # 删除选中行（从后往前）
+                    for idx in sorted(sel_rows, reverse=True):
+                        if 0 <= idx < len(self.file_items):
+                            # 同步移出收藏
+                            path = self.file_items[idx]['path']
+                            self.fav_items = [it for it in self.fav_items if it['path'] != path]
+                            del self.file_items[idx]
+                    self._refresh_file_table()
+                    self._refresh_fav_table()
+
+            elif event == '-CLEAR-':
+                self.file_items.clear()
+                self._refresh_file_table()
+
+            elif event == '-FAV-ADD-':
+                sel_rows: List[int] = values.get('-FILE-TABLE-', []) or []
+                for idx in sel_rows:
+                    if 0 <= idx < len(self.file_items):
+                        item = self.file_items[idx]
+                        if all(it['path'] != item['path'] for it in self.fav_items):
+                            self.fav_items.append(item)
+                self._refresh_fav_table()
+
+            elif event == '-FAV-DEL-':
+                sel_rows: List[int] = values.get('-FAV-TABLE-', []) or []
+                if sel_rows:
+                    for idx in sorted(sel_rows, reverse=True):
+                        if 0 <= idx < len(self.fav_items):
+                            del self.fav_items[idx]
+                    self._refresh_fav_table()
+
+            elif event == '-FAV-CLEAR-':
+                self.fav_items.clear()
+                self._refresh_fav_table()
+
+            # 参数联动（分段时长与抽帧间隔）
+            if event == '-SP-DUR-':
+                self.window['-SP-DUR-L-'].update(f"{values['-SP-DUR-']:.0f}")
+            elif event == '-EX-INTERVAL-':
+                try:
+                    self.window['-EX-INTERVAL-L-'].update(f"{float(values['-EX-INTERVAL-']):.0f} 秒")
+                except Exception:
+                    self.window['-EX-INTERVAL-L-'].update("")
+
+            # 选择对话
+            if event == '-EX-OUT-SEL-':
+                try:
+                    folder = sg.popup_get_folder('选择输出目录', no_window=True, default_path=values['-EX-OUT-'] or self.settings.OUTPUT_DIR)
+                except TypeError:
+                    folder = sg.popup_get_folder('选择输出目录', default_path=values['-EX-OUT-'] or self.settings.OUTPUT_DIR)
+                if folder:
+                    self.window['-EX-OUT-'].update(folder)
+            elif event == '-SP-OUT-SEL-':
+                try:
+                    folder = sg.popup_get_folder('选择输出目录', no_window=True, default_path=values['-SP-OUT-'] or self.settings.OUTPUT_DIR)
+                except TypeError:
+                    folder = sg.popup_get_folder('选择输出目录', default_path=values['-SP-OUT-'] or self.settings.OUTPUT_DIR)
+                if folder:
+                    self.window['-SP-OUT-'].update(folder)
+            elif event == '-GD-OUT-SEL-':
+                try:
+                    fname = sg.popup_get_file('选择输出文件', no_window=True, save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                except TypeError:
+                    fname = sg.popup_get_file('选择输出文件', save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                if fname:
+                    self.window['-GD-OUT-'].update(fname)
+            elif event == '-DU-OUT-SEL-':
+                try:
+                    fname = sg.popup_get_file('选择输出文件', no_window=True, save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                except TypeError:
+                    fname = sg.popup_get_file('选择输出文件', save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                if fname:
+                    self.window['-DU-OUT-'].update(fname)
+            elif event == '-SLI-OUT-SEL-':
+                try:
+                    fname = sg.popup_get_file('选择输出文件', no_window=True, save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                except TypeError:
+                    fname = sg.popup_get_file('选择输出文件', save_as=True, default_extension='.mp4', file_types=(('MP4', '*.mp4'),))
+                if fname:
+                    self.window['-SLI-OUT-'].update(fname)
+            elif event == '-AU-MUSIC-SEL-':
+                # 兼容 PySimpleGUIQt：使用空格分隔的扩展名模式，并提供默认路径到音频目录
+                start_path = values.get('-AU-MUSIC-') or getattr(self.settings, 'MUSIC_DIR', None)
+                try:
+                    fname = sg.popup_get_file(
+                        '选择音乐文件',
+                        no_window=True,
+                        default_path=start_path,
+                        file_types=(
+                            ("音频", "*.mp3 *.MP3 *.wav *.WAV *.m4a *.M4A"),
+                            ("所有文件", "*.*"),
+                        ),
+                    )
+                except TypeError:
+                    fname = sg.popup_get_file(
+                        '选择音乐文件',
+                        default_path=start_path,
+                        file_types=(
+                            ("音频", "*.mp3 *.MP3 *.wav *.WAV *.m4a *.M4A"),
+                            ("所有文件", "*.*"),
+                        ),
+                    )
+                if fname:
+                    self.window['-AU-MUSIC-'].update(fname)
+
+            # 运行任务
+            if event == '-RUN-EXTRACT-':
+                self.run_extract(values)
+            elif event == '-RUN-SPLIT-':
+                self.run_split(values)
+            elif event == '-RUN-GRID-':
+                self.run_grid(values)
+            elif event == '-RUN-DURATION-':
+                self.run_duration(values)
+            elif event == '-RUN-AUDIO-':
+                self.run_audio(values)
+            elif event == '-RUN-SLIDING-':
+                self.run_sliding(values)
+            elif event == '-STOP-':
+                self._stop_worker()
+
+            # 后台回传（队列轮询）
+            try:
+                while True:
+                    item = self._queue.get_nowait()
+                    kind = item[0]
+                    if kind == 'progress':
+                        percent, message = item[1]
+                        self._set_progress(percent, message)
+                    elif kind == 'log':
+                        self._log(item[1])
+                    elif kind == 'error':
+                        self._log('发生错误:\n' + item[1])
+                        self._set_progress(0)
+                        self.worker_thread = None
+                    elif kind == 'done':
+                        self._set_progress(100, '处理完成')
+                        self.worker_thread = None
+                    self._queue.task_done()
+            except queue.Empty:
+                pass
+
+        self.window.close()
+
+
+def main():
+    app = QtVideoClipsApp()
+    app.run()
+
+
+if __name__ == '__main__':
+    main()
+
+"""
 Video Clips 主界面
 集成所有功能模块的GUI界面
 """

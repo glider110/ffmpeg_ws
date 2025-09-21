@@ -108,6 +108,11 @@ choco install ffmpeg
 python run.py
 ```
 
+**方法1.1: 启动 PySimpleGUIQt 版 GUI（推荐）**
+```bash
+python run_psg_qt.py
+```
+
 **方法2: 直接运行主程序**
 ```bash
 python main.py
