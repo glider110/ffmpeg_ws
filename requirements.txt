@@ -8,17 +8,20 @@ speechrecognition>=3.10.4
 fake-useragent==1.4.0
 vosk>=0.3.45
 
-# Whisper (faster-whisper backend)
-faster-whisper==0.9.0
+# Whisper (faster-whisper backend) - 使用兼容 Python 3.8 的版本
+faster-whisper==0.6.0
 # 限定 tokenizers 版本，兼容 Python 3.8
 tokenizers==0.13.3
+# 显式指定兼容 Python 3.8 的 onnxruntime 版本
+onnxruntime>=1.15.0,<1.20.0
 
 # 繁简转换（可选，用于 --zh-simplified）
 opencc-python-reimplemented>=0.1.7
-
-
-# GUI (Qt)
-PySimpleGUIQt>=0.35.0
+opencv-python==4.8.1.78
+Pillow==10.0.0
+tqdm==4.66.1
+numpy==1.24.3
+matplotlib==3.7.2
 PyQt5>=5.15
 
 
