@@ -10,7 +10,7 @@ Video Clips 是一个基于 Python 开发的智能视频剪辑工具，提供了
 - 从视频中提取静态图片帧
 - 支持自定义抽帧间隔（秒）
 - 多种输出格式：PNG、JPG
-- 多种提取方法：OpenCV、FFmpeg、MoviePy
+- 多种提取方法：FFmpeg、MoviePy
 
 ### ✂️ 功能2: 视频切割  
 - 将长视频切割为5-30秒的短片段
@@ -61,8 +61,8 @@ video_clips/
 ```
 
 ### 技术栈
-- **GUI框架**: tkinter (Python内置)
-- **视频处理**: MoviePy, OpenCV
+- **GUI框架**: PyQt5 (Qt5)
+- **视频处理**: MoviePy
 - **高性能处理**: FFmpeg
 - **图像处理**: Pillow
 - **进度显示**: tqdm
@@ -103,24 +103,16 @@ choco install ffmpeg
 
 ### 启动程序
 
-**方法1: 使用启动脚本**
+**方式1: 直接运行 PyQt5 版主程序**
 ```bash
-python run.py
+python main_qt5.py
 ```
 
-**方法1.1: 启动 PySimpleGUIQt 版 GUI（推荐）**
-```bash
-python run_psg_qt.py
-```
-
-**方法2: 直接运行主程序**
-```bash
-python main.py
-```
+提示:
+- Linux 服务器等无显示环境下运行时，如遇到 Qt 平台插件报错，可设置环境变量 QT_QPA_PLATFORM=offscreen 后再运行。
 
 ## 💡 使用指南
-
-### GUI界面说明
+├── main_qt5.py                # PyQt5 GUI 主程序
 
 1. **文件选择**
    - 点击"📁 选择视频"选择单个或多个视频文件
@@ -151,7 +143,7 @@ result = extractor.extract_frames(
     video_path="input.mp4",
     interval=2.0,      # 每2秒提取一帧
     image_format="png",
-    method="cv2"
+   method="ffmpeg"
 )
 ```
 

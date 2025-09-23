@@ -21,15 +21,14 @@ from PyQt5.QtWidgets import (
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
 from PyQt5.QtGui import QFont, QPalette, QColor
 
-# 暂时注释掉业务逻辑导入，避免冲突
-# from config.settings import Settings
-# from modules.frame_extractor import FrameExtractor
-# from modules.video_splitter import VideoSplitter
-# from modules.grid_composer import GridComposer
-# from modules.duration_composer import DurationComposer
-# from modules.audio_mixer import AudioMixer
-# from modules.sliding_strip_composer import SlidingStripComposer
-# from utils.video_utils import VideoUtils
+from config.settings import Settings
+from modules.frame_extractor import FrameExtractor
+from modules.video_splitter import VideoSplitter
+from modules.grid_composer import GridComposer
+from modules.duration_composer import DurationComposer
+from modules.audio_mixer import AudioMixer
+from modules.sliding_strip_composer import SlidingStripComposer
+from utils.video_utils import VideoUtils
 
 
 class VideoClipsMainWindow(QMainWindow):
@@ -38,26 +37,26 @@ class VideoClipsMainWindow(QMainWindow):
     def __init__(self):
         super().__init__()
         
-        # 暂时简化初始化，避免导入冲突
-        # self.settings = Settings()
-        # self.settings.ensure_dirs()
+        # 初始化设置与目录
+        self.settings = Settings()
+        self.settings.ensure_dirs()
 
         # 收藏集合
         self.favorites = set()
 
         # 后台任务
-        self.worker_thread: Optional[threading.Thread] = None
+        self.worker_thread = None
         self.cancel_flag = threading.Event()
-        self._queue: Queue = Queue()
+        self._queue = Queue()
 
-        # 暂时注释掉业务模块初始化
-        # self.extractor = FrameExtractor()
-        # self.splitter = VideoSplitter()
-        # self.gridder = GridComposer()
-        # self.dcomposer = DurationComposer()
-        # self.mixer = AudioMixer()
-        # self.vutils = VideoUtils()
-        # self.scomposer = SlidingStripComposer()
+        # 业务模块初始化
+        self.extractor = FrameExtractor()
+        self.splitter = VideoSplitter()
+        self.gridder = GridComposer()
+        self.dcomposer = DurationComposer()
+        self.mixer = AudioMixer()
+        self.vutils = VideoUtils()
+        self.scomposer = SlidingStripComposer()
 
         # 文件数据
         self.file_items = []
@@ -399,6 +398,11 @@ class VideoClipsMainWindow(QMainWindow):
         video_info_action = QAction('📊 视频信息分析', self)
         video_info_action.triggered.connect(self.show_video_info)
         tools_menu.addAction(video_info_action)
+
+        # 重新分析文件信息
+        rescan_action = QAction('🔄 重新分析文件信息', self)
+        rescan_action.triggered.connect(self.rescan_file_info)
+        tools_menu.addAction(rescan_action)
         
         # 帮助菜单
         help_menu = menubar.addMenu('❓ 帮助')
@@ -494,8 +498,9 @@ class VideoClipsMainWindow(QMainWindow):
             return f"{m:02d}:{s:02d}"
 
     def _gather_info(self, path: str) -> Dict:
-        """收集文件信息 - 保持原逻辑不变"""
-        info = self.vutils.get_video_info(path) or {}
+        """收集文件信息，优先 ffprobe，失败则回退 moviepy"""
+        info = self.vutils.get_video_info(path, method='ffprobe') or \
+               self.vutils.get_video_info(path, method='moviepy') or {}
         name = os.path.basename(path)
         size = os.path.getsize(path) if os.path.exists(path) else 0
         size_str = self._format_file_size(size)
@@ -553,26 +558,20 @@ class VideoClipsMainWindow(QMainWindow):
             self.fav_table.setItem(i, 3, QTableWidgetItem(item['resolution']))
             self.fav_table.setItem(i, 4, QTableWidgetItem(item['format']))
     
-    def _gather_info(self, path: str) -> Dict:
-        """收集文件信息 - 简化版本"""
-        name = os.path.basename(path)
-        try:
-            size = os.path.getsize(path) if os.path.exists(path) else 0
-        except:
-            size = 0
-        size_str = self._format_file_size(size)
-        
-        # 简化版本，不依赖 VideoUtils
-        return {
-            'path': path,
-            'name': name,
-            'size': size,
-            'size_str': size_str,
-            'duration_s': 0.0,
-            'duration_str': '--:--',
-            'resolution': '-',
-            'format': os.path.splitext(name)[1].lstrip('.').lower() or '-',
-        }
+    def rescan_file_info(self):
+        """重新分析当前文件列表的信息（时长/分辨率/格式）"""
+        if not self.file_items:
+            QMessageBox.information(self, '提示', '当前文件列表为空')
+            return
+        updated = []
+        for item in self.file_items:
+            path = item.get('path')
+            if not path:
+                continue
+            info = self._gather_info(path)
+            updated.append(info)
+        self.file_items = updated
+        self.refresh_file_table()
     
     # 菜单和按钮事件处理
     def select_video_files(self):
@@ -678,14 +677,59 @@ class VideoClipsMainWindow(QMainWindow):
         self.fav_items = [item for item in self.file_items if item['path'] in self.favorites]
     
     def process_queue(self):
-        """处理队列消息（占位）"""
+        """处理后台线程发来的消息"""
         try:
             while not self._queue.empty():
-                msg_type, data = self._queue.get_nowait()
-                # 这里可以处理进度更新等消息
-                pass
+                msg = self._queue.get_nowait()
+                if not isinstance(msg, (list, tuple)) or len(msg) < 1:
+                    continue
+                msg_type = msg[0]
+                data = msg[1] if len(msg) > 1 else None
+                if msg_type == 'progress' and isinstance(data, tuple):
+                    percent, text = data
+                    self._set_progress(percent, text)
+                elif msg_type == 'log':
+                    self._log(str(data))
+                elif msg_type == 'error':
+                    self._log('❌ 发生错误\n' + str(data))
+                    QMessageBox.critical(self, '错误', str(data)[:4000])
+                    self._set_progress(0)
+                elif msg_type == 'done':
+                    self._log('✅ 任务完成')
+                    self._set_progress(100)
         except queue.Empty:
-            pass
+            return
+
+    def _progress_callback_factory(self, prefix: str = ''):
+        def cb(percent: float, message: str):
+            try:
+                self._queue.put(('progress', (percent, f"{prefix}{message}")))
+            except Exception:
+                pass
+        return cb
+
+    def _set_progress(self, value: float, message: str = ''):
+        try:
+            value = max(0, min(100, int(value)))
+        except Exception:
+            value = 0
+        self.progress_bar.setValue(value)
+        if message:
+            self._log(message)
+
+    def _log(self, text: str):
+        self.log_text.append(text)
+
+    def _start_worker(self, target):
+        if self.worker_thread and self.worker_thread.is_alive():
+            QMessageBox.information(self, '提示', '已有任务在执行中，请先停止或等待完成')
+            return
+        self.cancel_flag.clear()
+        self._set_progress(0)
+        # 可选：清空日志
+        # self.log_text.clear()
+        self.worker_thread = threading.Thread(target=target, daemon=True)
+        self.worker_thread.start()
     
     # 菜单事件处理（简化版本）
     def cleanup_temp(self):
@@ -709,7 +753,7 @@ class VideoClipsMainWindow(QMainWindow):
             '📽️ 1. 使用"添加文件"或"添加文件夹"导入视频\n'
             '⭐ 2. 选择视频后可添加到收藏列表\n'
             '🔧 3. 使用右侧选项卡进行各种剪辑操作\n\n'
-            '💡 注意：这是从 PySimpleGUIQt 迁移的版本'
+            '💡 提示：FFmpeg 与 MoviePy 需正确安装方可使用全部功能'
         )
     
     def show_about(self):
@@ -718,9 +762,8 @@ class VideoClipsMainWindow(QMainWindow):
             self,
             'ℹ️ 关于',
             '🎬 视频剪辑工具 PyQt5 版 ✨\n\n'
-            '🔧 从 PySimpleGUIQt 迁移而来\n'
-            '🎯 保留所有业务逻辑，只更换 UI 框架\n\n'
-            '🐍 PyQt5 版本 🚀'
+            '🎯 集成抽帧、切割、宫格、时长、配音、滑动等功能\n\n'
+            '🐍 纯 PyQt5 界面版本 🚀'
         )
     
     # 选项卡相关的事件处理方法
@@ -779,75 +822,267 @@ class VideoClipsMainWindow(QMainWindow):
     # 任务执行方法（占位实现）
     def run_extract(self):
         """运行抽帧任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
+        files = self.get_selected_files()
+        if not files:
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
-        
-        self.log_message(f'🚀 开始抽帧任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 FrameExtractor
+
+        interval = float(self.extract_interval_slider.value())
+        fmt = self.extract_format.currentText()
+        method = self.extract_method.currentText()
+        outdir_root = self.extract_output.text().strip() or os.path.join(self.settings.OUTPUT_DIR, 'frames')
+
+        def work():
+            try:
+                for fp in files:
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    outdir = os.path.join(outdir_root, name)
+                    os.makedirs(outdir, exist_ok=True)
+                    self._queue.put(('log', f'抽帧: {fp} -> {outdir}'))
+                    result = self.extractor.extract_frames(
+                        video_path=fp,
+                        output_dir=outdir,
+                        interval=interval,
+                        image_format=fmt,
+                        method=method,
+                        progress_callback=self._progress_callback_factory(f"[{name}] ")
+                    )
+                    self._queue.put(('log', f'完成抽帧 {len(result)} 张: {name}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def run_split(self):
         """运行切割任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
+        files = self.get_selected_files()
+        if not files:
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
-        
-        self.log_message(f'✂️ 开始切割任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 VideoSplitter
+
+        seg_dur = float(self.split_duration_slider.value())
+        method = self.split_method.currentText()
+        try:
+            overlap = float(self.split_overlap.text() or '0.0')
+        except Exception:
+            overlap = 0.0
+        outdir_root = self.split_output.text().strip() or os.path.join(self.settings.OUTPUT_DIR, 'segments')
+        try:
+            r_n = int(self.split_random_count.text() or '8')
+        except Exception:
+            r_n = 8
+        try:
+            r_min = float(self.split_random_min.text() or '5')
+        except Exception:
+            r_min = 5.0
+        try:
+            r_max = float(self.split_random_max.text() or '10')
+        except Exception:
+            r_max = 10.0
+
+        def work():
+            try:
+                for fp in files:
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    outdir = os.path.join(outdir_root, name)
+                    os.makedirs(outdir, exist_ok=True)
+                    self._queue.put(('log', f'切割: {fp} -> {outdir} ({method})'))
+                    if method == 'ffmpeg':
+                        result = self.splitter.split_video_ffmpeg(fp, segment_duration=seg_dur, overlap=overlap, output_dir=outdir)
+                    elif method == 'random':
+                        result = self.splitter.split_video_random(fp, num_segments=r_n, min_duration=r_min, max_duration=r_max, output_dir=outdir, progress_callback=self._progress_callback_factory(f"[{name}] "))
+                    else:
+                        result = self.splitter.split_video_equal(fp, segment_duration=seg_dur, output_dir=outdir, overlap=overlap, progress_callback=self._progress_callback_factory(f"[{name}] "))
+                    self._queue.put(('log', f'完成切割 {len(result)} 段: {name}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def run_grid(self):
         """运行宫格合成任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
-            QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
+        files = self.get_selected_files()
+        if len(files) < 2:
+            QMessageBox.warning(self, '⚠️ 警告', '请至少选择两个视频 📽️')
             return
-        
-        self.log_message(f'🔲 开始宫格合成任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 GridComposer
+
+        layout = self.grid_layout.currentText()
+        method = self.grid_method.currentText()
+        dur_text = (self.grid_duration.text() or '').strip()
+        duration = float(dur_text) if dur_text else None
+        sync = self.grid_sync.isChecked()
+        size_text = self.grid_size.text().strip()
+        try:
+            w, h = map(int, size_text.lower().replace('x', ' ').split())
+            target_size = (w, h)
+        except Exception:
+            target_size = (1920, 1080)
+        out_file = self.grid_output.text().strip() or os.path.join(self.settings.OUTPUT_DIR, 'grid_videos', 'grid_2x2.mp4')
+
+        def work():
+            try:
+                self._queue.put(('log', f'宫格: {layout}, {method}, 输出: {out_file}'))
+                if method == 'ffmpeg':
+                    result = self.gridder.create_grid_ffmpeg(files, layout=layout, output_path=out_file, duration=duration)
+                else:
+                    result = self.gridder.create_grid_moviepy(files, layout=layout, output_path=out_file, duration=duration, sync=sync, target_size=target_size, progress_callback=self._progress_callback_factory('[grid] '))
+                self._queue.put(('log', f'宫格创建成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def run_duration(self):
         """运行时长合成任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
+        files = self.get_selected_files()
+        if not files:
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
-        
-        self.log_message(f'⏰ 开始时长合成任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 DurationComposer
+
+        try:
+            target = float(self.duration_target.currentText())
+        except Exception:
+            target = 15.0
+        strategy = self.duration_strategy.currentText()
+        tran = self.duration_transition.currentText()
+        try:
+            tran_s = float(self.duration_transition_sec.text() or '0.5')
+        except Exception:
+            tran_s = 0.5
+        exact = self.duration_exact.isChecked()
+        out_file = self.duration_output.text().strip() or os.path.join(self.settings.OUTPUT_DIR, 'duration_videos', 'composed_15s.mp4')
+
+        def work():
+            try:
+                self._queue.put(('log', f'时长组合: {target}s, {strategy}, {tran} -> {out_file}'))
+                result = self.dcomposer.compose_duration_video(
+                    video_paths=files,
+                    target_duration=target,
+                    output_path=out_file,
+                    strategy=strategy,
+                    transition_type=tran,
+                    transition_duration=tran_s,
+                    trim_to_exact=exact,
+                    progress_callback=self._progress_callback_factory('[duration] ')
+                )
+                self._queue.put(('log', f'时长组合成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def run_audio(self):
         """运行配音任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
+        files = self.get_selected_files()
+        if not files:
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
-        
-        self.log_message(f'🎤 开始配音任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 AudioMixer
+
+        method = self.audio_method.currentText()
+        try:
+            mvol = float(self.audio_music_vol.text() or '0.3')
+        except Exception:
+            mvol = 0.3
+        try:
+            vvol = float(self.audio_video_vol.text() or '0.7')
+        except Exception:
+            vvol = 0.7
+        try:
+            fin = float(self.audio_fade_in.text() or '1.0')
+        except Exception:
+            fin = 1.0
+        try:
+            fout = float(self.audio_fade_out.text() or '1.0')
+        except Exception:
+            fout = 1.0
+        try:
+            offset = float(self.audio_offset.text() or '0')
+        except Exception:
+            offset = 0.0
+        music_file = (self.audio_music_file.text() or '').strip() or None
+        batch = self.audio_batch.isChecked()
+
+        def work():
+            try:
+                if batch and len(files) > 1 and music_file is None:
+                    self._queue.put(('log', '批量配音：将为每个视频选择音乐'))
+                    results = self.mixer.batch_add_music(
+                        video_paths=files,
+                        music_volume=mvol,
+                        video_volume=vvol,
+                        unique_music=True,
+                        progress_callback=self._progress_callback_factory('[batch-audio] ')
+                    )
+                    self._queue.put(('log', f'批量配音完成: {len(results)} 个输出'))
+                else:
+                    for fp in files:
+                        self._queue.put(('log', f'为 {os.path.basename(fp)} 添加音乐...'))
+                        if method == 'ffmpeg':
+                            out_path = self.mixer.add_music_to_video_ffmpeg(
+                                video_path=fp,
+                                music_path=music_file,
+                                music_volume=mvol,
+                                video_volume=vvol,
+                                fade_duration=max(fin, fout),
+                                music_start_offset=offset
+                            )
+                        else:
+                            out_path = self.mixer.add_music_to_video_moviepy(
+                                video_path=fp,
+                                music_path=music_file,
+                                music_volume=mvol,
+                                video_volume=vvol,
+                                fade_in_duration=fin,
+                                fade_out_duration=fout,
+                                music_start_offset=offset,
+                                progress_callback=self._progress_callback_factory('[audio] ')
+                            )
+                        self._queue.put(('log', f'完成：{out_path}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def run_sliding(self):
         """运行滑动合成任务"""
-        selected_files = self.get_selected_files()
-        if not selected_files:
+        files = self.get_selected_files()
+        if not files:
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
-        
-        self.log_message(f'🏃 开始滑动合成任务，共 {len(selected_files)} 个文件')
-        self.log_message('💡 注意：业务逻辑尚未连接，这只是 UI 演示')
-        
-        # TODO: 连接到实际的 SlidingStripComposer
+
+        size_text = (self.sliding_size.text() or '1920x1080').strip()
+        try:
+            w, h = map(int, size_text.lower().replace('x', ' ').split())
+            target_size = (w, h)
+        except Exception:
+            target_size = (1920, 1080)
+        try:
+            delta = float(self.sliding_delta.text() or '0.4')
+        except Exception:
+            delta = 0.4
+        out_file = self.sliding_output.text().strip() or os.path.join(self.settings.OUTPUT_DIR, 'sliding_1x3.mp4')
+
+        def work():
+            try:
+                self._queue.put(('log', f'1x3滑动合成: 输出 {out_file}, 尺寸 {target_size}, Δt={delta}s'))
+                result = self.scomposer.compose_1x3_sliding(
+                    video_paths=files,
+                    output_path=out_file,
+                    output_size=target_size,
+                    transition_duration=delta,
+                    progress_callback=self._progress_callback_factory('[sliding] ')
+                )
+                self._queue.put(('log', f'滑动合成成功: {result}'))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
     
     def stop_task(self):
         """停止当前任务"""
@@ -949,7 +1184,7 @@ class VideoClipsMainWindow(QMainWindow):
         
         format_layout.addWidget(QLabel('⚙️ 方法:'))
         self.extract_method = QComboBox()
-        self.extract_method.addItems(['auto', 'ffmpeg', 'moviepy', 'cv2'])
+        self.extract_method.addItems(['auto', 'ffmpeg', 'moviepy'])
         self.extract_method.setCurrentText('ffmpeg')
         format_layout.addWidget(self.extract_method)
         layout.addLayout(format_layout)
@@ -1275,5 +1510,11 @@ class QtVideoClipsApp:
 
 
 if __name__ == '__main__':
+    # 在 Linux 无显示环境下，避免 Qt XCB 插件导致的崩溃（退出码 134）
+    try:
+        if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
+            os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+    except Exception:
+        pass
     app = QtVideoClipsApp()
     sys.exit(app.run())
