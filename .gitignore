@@ -10,3 +10,4 @@ video_clips/output/
 video_clips/modules/__pycache__/
 **/__pycache__/*
 __pycache__/
+video_clips/temp/

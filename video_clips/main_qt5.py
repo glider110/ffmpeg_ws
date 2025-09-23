@@ -19,7 +19,7 @@ from PyQt5.QtWidgets import (
     QMessageBox, QSpinBox, QDoubleSpinBox, QGroupBox, QGridLayout
 )
 from PyQt5.QtCore import Qt, QTimer, QThread, pyqtSignal, QObject
-from PyQt5.QtGui import QFont, QPalette, QColor
+from PyQt5.QtGui import QFont, QPalette, QColor, QPixmap
 
 from config.settings import Settings
 from modules.frame_extractor import FrameExtractor
@@ -453,6 +453,9 @@ class VideoClipsMainWindow(QMainWindow):
         
         left_layout.addWidget(file_group)
         
+        # 连接文件表选择变化到预览
+        self.file_table.itemSelectionChanged.connect(self.on_file_selection_changed)
+        
         # 收藏操作按钮
         fav_button_layout = QHBoxLayout()
         
@@ -478,7 +481,79 @@ class VideoClipsMainWindow(QMainWindow):
         
         left_layout.addWidget(fav_group)
         
+        # 连接收藏表选择变化到预览
+        self.fav_table.itemSelectionChanged.connect(self.on_fav_selection_changed)
+        
+        # 预览区域
+        preview_group = QGroupBox('🔍 预览')
+        preview_layout = QVBoxLayout(preview_group)
+        self.preview_label = QLabel('无预览')
+        self.preview_label.setAlignment(Qt.AlignCenter)
+        # 使用配置中的预览尺寸
+        try:
+            pw, ph = int(self.settings.PREVIEW_WIDTH), int(self.settings.PREVIEW_HEIGHT)
+        except Exception:
+            pw, ph = 400, 300
+        self.preview_label.setFixedSize(pw, ph)
+        self.preview_label.setStyleSheet('border: 2px solid rgb(173, 216, 230); border-radius: 6px; background: white;')
+        preview_layout.addWidget(self.preview_label)
+        left_layout.addWidget(preview_group)
+        
         parent.addWidget(left_widget)
+
+    def on_file_selection_changed(self):
+        """文件表选择变化时更新预览"""
+        paths = [self.file_items[idx.row()]['path'] for idx in self.file_table.selectedIndexes() if idx.column() == 0]
+        path = paths[0] if paths else None
+        self._update_preview(path)
+
+    def on_fav_selection_changed(self):
+        """收藏表选择变化时更新预览"""
+        paths = [self.fav_items[idx.row()]['path'] for idx in self.fav_table.selectedIndexes() if idx.column() == 0]
+        path = paths[0] if paths else None
+        self._update_preview(path)
+
+    def _update_preview(self, path: Optional[str]):
+        """根据路径更新预览区域"""
+        if not path or not os.path.exists(path):
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText('无预览')
+            return
+        pix = self._generate_thumbnail(path)
+        if pix and not pix.isNull():
+            scaled = pix.scaled(self.preview_label.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+            self.preview_label.setPixmap(scaled)
+            self.preview_label.setText('')
+        else:
+            self.preview_label.setPixmap(QPixmap())
+            self.preview_label.setText('无法生成预览')
+
+    def _generate_thumbnail(self, path: str) -> Optional[QPixmap]:
+        """生成图片/视频缩略图，返回 QPixmap"""
+        ext = os.path.splitext(path)[1].lower()
+        # 图片文件直接载入
+        if ext in [e.lower() for e in self.settings.SUPPORTED_IMAGE_FORMATS]:
+            pix = QPixmap(path)
+            return pix
+        # 视频文件用 ffmpeg 生成
+        if ext in [e.lower() for e in self.settings.SUPPORTED_VIDEO_FORMATS]:
+            base = os.path.basename(path)
+            safe = base.replace(' ', '_')
+            thumb_path = os.path.join(self.settings.TEMP_DIR, f"thumb_{safe}.jpg")
+            try:
+                # 使用工具方法生成缩略图
+                self.vutils.create_video_thumbnail(
+                    video_path=path,
+                    output_path=thumb_path,
+                    timestamp=1.0,
+                    width=int(self.settings.PREVIEW_WIDTH),
+                    height=int(self.settings.PREVIEW_HEIGHT)
+                )
+                if os.path.exists(thumb_path):
+                    return QPixmap(thumb_path)
+            except Exception:
+                pass
+        return QPixmap()
     
     # 保持所有原有的辅助方法不变
     def _format_seconds(self, sec: float) -> str:
@@ -1157,6 +1232,7 @@ class VideoClipsMainWindow(QMainWindow):
         right_layout.addWidget(self.log_text)
         
         parent.addWidget(right_widget)
+
     
     def create_extract_tab(self):
         """创建抽帧选项卡"""
@@ -1512,8 +1588,12 @@ class QtVideoClipsApp:
 if __name__ == '__main__':
     # 在 Linux 无显示环境下，避免 Qt XCB 插件导致的崩溃（退出码 134）
     try:
-        if sys.platform.startswith('linux') and not os.environ.get('DISPLAY'):
-            os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
+        if sys.platform.startswith('linux'):
+            qpa = os.environ.get('QT_QPA_PLATFORM')
+            has_x11 = bool(os.environ.get('DISPLAY'))
+            has_wayland = bool(os.environ.get('WAYLAND_DISPLAY'))
+            if not qpa and not (has_x11 or has_wayland):
+                os.environ.setdefault('QT_QPA_PLATFORM', 'offscreen')
     except Exception:
         pass
     app = QtVideoClipsApp()
