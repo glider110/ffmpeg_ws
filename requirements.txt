@@ -8,8 +8,8 @@ speechrecognition>=3.10.4
 fake-useragent==1.4.0
 vosk>=0.3.45
 
-# Whisper (faster-whisper backend) - 使用兼容 Python 3.8 的版本
-faster-whisper==0.6.0
+# Whisper (faster-whisper backend) - 支持 Whisper v3/large-v3
+faster-whisper>=1.0.3
 # 限定 tokenizers 版本，兼容 Python 3.8
 tokenizers==0.13.3
 # 显式指定兼容 Python 3.8 的 onnxruntime 版本

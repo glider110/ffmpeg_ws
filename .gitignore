@@ -11,3 +11,5 @@ video_clips/modules/__pycache__/
 **/__pycache__/*
 __pycache__/
 video_clips/temp/
+stt/output/
+stt/models/*

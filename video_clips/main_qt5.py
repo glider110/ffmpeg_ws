@@ -28,6 +28,7 @@ from modules.grid_composer import GridComposer
 from modules.duration_composer import DurationComposer
 from modules.audio_mixer import AudioMixer
 from modules.sliding_strip_composer import SlidingStripComposer
+from modules.stt_transcriber import transcribe_to_files
 from utils.video_utils import VideoUtils
 
 
@@ -399,21 +400,78 @@ class VideoClipsMainWindow(QMainWindow):
         video_info_action.triggered.connect(self.show_video_info)
         tools_menu.addAction(video_info_action)
 
+        # 语音转文字（Whisper）
+        stt_action = QAction('🗣️ 语音转文字 (Whisper)', self)
+        stt_action.triggered.connect(self.run_stt_whisper)
+        tools_menu.addAction(stt_action)
+
         # 重新分析文件信息
         rescan_action = QAction('🔄 重新分析文件信息', self)
         rescan_action.triggered.connect(self.rescan_file_info)
         tools_menu.addAction(rescan_action)
-        
+
         # 帮助菜单
         help_menu = menubar.addMenu('❓ 帮助')
-        
+
         usage_action = QAction('📖 使用说明', self)
         usage_action.triggered.connect(self.show_usage)
         help_menu.addAction(usage_action)
-        
+
         about_action = QAction('ℹ️ 关于', self)
         about_action.triggered.connect(self.show_about)
         help_menu.addAction(about_action)
+
+    def run_stt_whisper(self):
+        """最小集成：选择一个音/视频文件，使用本地 small 模型（若存在）在 CPU 上转写。"""
+        try:
+            # 选择文件
+            file_path, _ = QFileDialog.getOpenFileName(
+                self,
+                '选择音频/视频文件用于转写',
+                os.getcwd(),
+                'Media Files (*.mp3 *.wav *.m4a *.aac *.flac *.ogg *.mp4 *.mov *.mkv *.avi);;All Files (*)'
+            )
+            if not file_path:
+                return
+
+            # 等待光标
+            QApplication.setOverrideCursor(Qt.WaitCursor)
+
+            # 使用封装模块进行转写（默认：CPU + int8，中文 + 简体转换）
+            result = transcribe_to_files(
+                input_path=file_path,
+                model_name_or_path=None,  # 自动优先 stt/models/whisper-small，否则 'small'
+                device='cpu',
+                compute_type='int8',
+                language='zh',
+                task='transcribe',
+                beam_size=5,
+                vad_filter=True,
+                word_timestamps=False,
+                zh_simplified=True,
+                out_txt=None,
+                out_srt=None,
+            )
+
+            # 成功提示
+            msg = [
+                '识别完成 ✅',
+                f"语言: {result.language}",
+                f"时长: {result.duration}",
+                f"TXT: {result.txt_path}",
+                f"SRT: {result.srt_path}",
+            ]
+            QMessageBox.information(self, 'Whisper 转写完成', "\n".join(msg))
+            # 打印到日志窗口（完整文本可能较长，这里做轻度截断）
+            text_preview = result.text if len(result.text) <= 4000 else (result.text[:4000] + ' ...[截断]')
+            self._log('🗣️ Whisper 文本：\n' + text_preview)
+        except Exception as e:
+            traceback_str = traceback.format_exc()
+            QMessageBox.critical(self, 'Whisper 转写失败', f"错误: {e}\n\n详情:\n{traceback_str}")
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        
         
     def create_left_panel(self, parent):
         """创建左侧文件列表面板"""
@@ -1208,6 +1266,7 @@ class VideoClipsMainWindow(QMainWindow):
         self.create_duration_tab()
         self.create_audio_tab()
         self.create_sliding_tab()
+        self.create_stt_tab()
         
         right_layout.addWidget(self.tab_widget)
         
@@ -1567,6 +1626,161 @@ class VideoClipsMainWindow(QMainWindow):
         
         layout.addStretch()
         self.tab_widget.addTab(tab, '🏃 1x3滑动')
+
+    def create_stt_tab(self):
+        """创建 语音转文字(Whisper) 选项卡"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # 模型与设备
+        model_row = QHBoxLayout()
+        model_row.addWidget(QLabel('🧠 模型(名称/目录):'))
+        self.stt_model = QLineEdit('stt/models/whisper-small')
+        model_row.addWidget(self.stt_model)
+        model_browse = QPushButton('📁 选择目录')
+        model_browse.clicked.connect(self.browse_stt_model_dir)
+        model_row.addWidget(model_browse)
+        layout.addLayout(model_row)
+
+        device_row = QHBoxLayout()
+        device_row.addWidget(QLabel('🖥️ 设备:'))
+        self.stt_device = QComboBox()
+        self.stt_device.addItems(['auto', 'cpu', 'cuda'])
+        self.stt_device.setCurrentText('cpu')
+        device_row.addWidget(self.stt_device)
+
+        device_row.addWidget(QLabel('🧮 精度:'))
+        self.stt_compute = QComboBox()
+        self.stt_compute.addItems(['int8', 'int8_float16', 'int8_float32', 'float16', 'float32'])
+        self.stt_compute.setCurrentText('int8')
+        device_row.addWidget(self.stt_compute)
+        layout.addLayout(device_row)
+
+        # 语言与任务
+        lang_row = QHBoxLayout()
+        lang_row.addWidget(QLabel('🈶 语言:'))
+        self.stt_lang = QLineEdit('zh')
+        self.stt_lang.setMaximumWidth(120)
+        lang_row.addWidget(self.stt_lang)
+
+        lang_row.addWidget(QLabel('🎯 任务:'))
+        self.stt_task = QComboBox()
+        self.stt_task.addItems(['transcribe', 'translate'])
+        self.stt_task.setCurrentText('transcribe')
+        lang_row.addWidget(self.stt_task)
+
+        lang_row.addWidget(QLabel('🌀 beam:'))
+        self.stt_beam = QSpinBox()
+        self.stt_beam.setRange(1, 10)
+        self.stt_beam.setValue(5)
+        lang_row.addWidget(self.stt_beam)
+        layout.addLayout(lang_row)
+
+        # 可选项
+        opts_row = QHBoxLayout()
+        self.stt_vad = QCheckBox('🪓 VAD 静音过滤')
+        self.stt_vad.setChecked(True)
+        opts_row.addWidget(self.stt_vad)
+
+        self.stt_word_ts = QCheckBox('🧩 词级时间戳')
+        self.stt_word_ts.setChecked(False)
+        opts_row.addWidget(self.stt_word_ts)
+
+        self.stt_simplified = QCheckBox('🇨🇳 简体输出')
+        self.stt_simplified.setChecked(True)
+        opts_row.addWidget(self.stt_simplified)
+        layout.addLayout(opts_row)
+
+        # 输出目录（可选）
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel('📤 输出目录(可选):'))
+        self.stt_output_dir = QLineEdit('')
+        out_row.addWidget(self.stt_output_dir)
+        out_browse = QPushButton('📁 选择')
+        out_browse.clicked.connect(self.browse_stt_output_dir)
+        out_row.addWidget(out_browse)
+        layout.addLayout(out_row)
+
+        # 批量处理
+        self.stt_batch = QCheckBox('🔄 对每个选择文件批量转写')
+        self.stt_batch.setChecked(True)
+        layout.addWidget(self.stt_batch)
+
+        # 开始按钮
+        self.stt_btn = QPushButton('🗣️ 开始转写')
+        self.stt_btn.clicked.connect(self.run_stt)
+        layout.addWidget(self.stt_btn)
+
+        layout.addStretch()
+        self.tab_widget.addTab(tab, '🗣️ 语音转文字')
+
+    def browse_stt_model_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, '📁 选择 Whisper 模型目录')
+        if folder:
+            self.stt_model.setText(folder)
+
+    def browse_stt_output_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, '📁 选择转写输出目录')
+        if folder:
+            self.stt_output_dir.setText(folder)
+
+    def run_stt(self):
+        """运行 STT 批量任务（基于所选文件列表）"""
+        files = self.get_selected_files()
+        if not files:
+            QMessageBox.warning(self, '⚠️ 警告', '请先在左侧选择至少一个音/视频文件 📽️/🎵')
+            return
+
+        model_spec = self.stt_model.text().strip()
+        device = self.stt_device.currentText()
+        compute = self.stt_compute.currentText()
+        language = self.stt_lang.text().strip() or None
+        task = self.stt_task.currentText()
+        beam = int(self.stt_beam.value())
+        vad = bool(self.stt_vad.isChecked())
+        word_ts = bool(self.stt_word_ts.isChecked())
+        simplified = bool(self.stt_simplified.isChecked())
+        out_dir = self.stt_output_dir.text().strip()
+
+        def work():
+            try:
+                total = len(files)
+                for idx, fp in enumerate(files, start=1):
+                    name = os.path.splitext(os.path.basename(fp))[0]
+                    self._queue.put(('log', f'开始转写: {fp}'))
+
+                    # 组装输出路径（若指定了输出目录）
+                    out_txt = out_srt = None
+                    if out_dir:
+                        os.makedirs(out_dir, exist_ok=True)
+                        out_txt = os.path.join(out_dir, f"{name}.whisper.txt")
+                        out_srt = os.path.join(out_dir, f"{name}.whisper.srt")
+
+                    result = transcribe_to_files(
+                        input_path=fp,
+                        model_name_or_path=(model_spec or None),
+                        device=device,
+                        compute_type=compute,
+                        language=language,
+                        task=task,
+                        beam_size=beam,
+                        vad_filter=vad,
+                        word_timestamps=word_ts,
+                        zh_simplified=simplified,
+                        out_txt=out_txt,
+                        out_srt=out_srt,
+                    )
+
+                    # 记录结果到日志（避免过长文本刷屏，截断至4k字符）
+                    text_preview = result.text if len(result.text) <= 4000 else (result.text[:4000] + ' ...[截断]')
+                    self._queue.put(('log', f'完成: {name} -> TXT:{result.txt_path} SRT:{result.srt_path}\n🗣️ 文本:\n{text_preview}'))
+                    percent = idx / max(1, total) * 100.0
+                    self._queue.put(('progress', (percent, f"完成 {idx}/{total}: {name}")))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
 
 
 class QtVideoClipsApp:

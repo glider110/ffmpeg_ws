@@ -1,7 +1,7 @@
 '''
 Author: glider
 Date: 2024-08-11 09:09:05
-LastEditTime: 2024-08-11 09:12:01
+LastEditTime: 2025-10-01 13:03:05
 FilePath: /ffmpeg_ws/toolkits/VideoToAudio.py
 Version:  v0.01
 Description: 
@@ -13,7 +13,7 @@ import os
 import subprocess
 
 # 定义输入和输出目录
-input_dir = "./"   # 将这个路径替换为你的视频文件夹路径
+input_dir = "./input"   # 将这个路径替换为你的视频文件夹路径
 output_dir = "./output" # 将这个路径替换为你想要保存MP3文件的路径
 
 # 创建输出目录，如果不存在
