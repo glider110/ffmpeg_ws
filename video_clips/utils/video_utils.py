@@ -5,6 +5,7 @@
 import os
 import subprocess
 from typing import Dict, Optional, Tuple, List
+import json
 try:
     from moviepy.editor import VideoFileClip
     HAS_MOVIEPY = True
@@ -40,53 +41,56 @@ class VideoUtils:
         
         try:
             result = subprocess.run(cmd, capture_output=True, text=True, check=True)
-            import json
             data = json.loads(result.stdout)
-            
-            # 提取视频流信息
+
+            # 提取流信息（允许仅音频文件）
             video_stream = None
             audio_stream = None
-            
+
             for stream in data.get('streams', []):
                 if stream.get('codec_type') == 'video' and video_stream is None:
                     video_stream = stream
                 elif stream.get('codec_type') == 'audio' and audio_stream is None:
                     audio_stream = stream
-            
-            if video_stream is None:
-                return None
-            
-            # 构建信息字典
-            info = {
+
+            # 基础信息
+            info: Dict = {
                 'filename': os.path.basename(video_path),
                 'filepath': video_path,
                 'filesize': os.path.getsize(video_path),
-                'duration': float(data['format'].get('duration', 0)),
-                'bitrate': int(data['format'].get('bit_rate', 0)),
-                'format_name': data['format'].get('format_name', ''),
-                'video': {
+                'duration': float(data.get('format', {}).get('duration', 0) or 0),
+                'bitrate': int((data.get('format', {}) or {}).get('bit_rate', 0) or 0),
+                'format_name': (data.get('format', {}) or {}).get('format_name', '')
+            }
+
+            if video_stream is not None:
+                info['video'] = {
                     'codec': video_stream.get('codec_name', ''),
-                    'width': int(video_stream.get('width', 0)),
-                    'height': int(video_stream.get('height', 0)),
+                    'width': int(video_stream.get('width', 0) or 0),
+                    'height': int(video_stream.get('height', 0) or 0),
                     'fps': self._parse_fps(video_stream.get('r_frame_rate', '0/1')),
-                    'bitrate': int(video_stream.get('bit_rate', 0)) if video_stream.get('bit_rate') else 0,
+                    'bitrate': int(video_stream.get('bit_rate', 0) or 0),
                     'pixel_format': video_stream.get('pix_fmt', '')
                 }
-            }
-            
-            # 添加音频信息（如果有）
-            if audio_stream:
+            else:
+                info['video'] = None
+
+            if audio_stream is not None:
                 info['audio'] = {
                     'codec': audio_stream.get('codec_name', ''),
-                    'sample_rate': int(audio_stream.get('sample_rate', 0)),
-                    'channels': int(audio_stream.get('channels', 0)),
-                    'bitrate': int(audio_stream.get('bit_rate', 0)) if audio_stream.get('bit_rate') else 0
+                    'sample_rate': int(audio_stream.get('sample_rate', 0) or 0),
+                    'channels': int(audio_stream.get('channels', 0) or 0),
+                    'bitrate': int(audio_stream.get('bit_rate', 0) or 0)
                 }
             else:
                 info['audio'] = None
-            
+
+            # 如果既没有视频也没有音频流，认为无效
+            if not video_stream and not audio_stream:
+                return None
+
             return info
-            
+
         except (subprocess.CalledProcessError, json.JSONDecodeError, Exception) as e:
             print(f"获取视频信息失败 (ffprobe): {e}")
             return None

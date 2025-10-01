@@ -100,7 +100,26 @@ class VideoSplitter:
                         
                 except Exception as e:
                     print(f"切割片段失败 [{start:.1f}s-{end:.1f}s]: {e}")
-                    continue
+                    # 回退方案：使用 FFmpeg 无重编码拷贝切割该片段
+                    try:
+                        ff_output_filename = f"{video_name}_segment_{idx:03d}_{start:.1f}s-{end:.1f}s.mp4"
+                        ff_output_path = os.path.join(output_dir, ff_output_filename)
+                        cmd = [
+                            'ffmpeg', '-y',
+                            '-ss', str(start), '-to', str(end),
+                            '-i', video_path,
+                            '-c', 'copy', ff_output_path
+                        ]
+                        print(f"回退FFmpeg切割: {' '.join(cmd)}")
+                        subprocess.run(cmd, capture_output=True, text=True, check=True)
+                        output_files.append(ff_output_path)
+                        print(f"回退切割成功: {ff_output_filename} ({end-start:.1f}s)")
+                        if progress_callback:
+                            progress = (i + 1) / len(segments) * 100
+                            progress_callback(progress, f"(回退FFmpeg) 已切割 {i + 1}/{len(segments)} 个片段")
+                    except subprocess.CalledProcessError as ee:
+                        print(f"回退FFmpeg切割失败 [{start:.1f}s-{end:.1f}s]: {ee.stderr}")
+                        continue
         
         print(f"视频切割完成! 共生成 {len(output_files)} 个片段到: {output_dir}")
         return output_files

@@ -29,6 +29,7 @@ from modules.duration_composer import DurationComposer
 from modules.audio_mixer import AudioMixer
 from modules.sliding_strip_composer import SlidingStripComposer
 from modules.stt_transcriber import transcribe_to_files
+from modules.audio_extractor import extract_audio, ExtractOptions
 from utils.video_utils import VideoUtils
 
 
@@ -639,7 +640,7 @@ class VideoClipsMainWindow(QMainWindow):
         size_str = self._format_file_size(size)
         duration = float(info.get('duration', 0.0)) if info else 0.0
         duration_str = self._format_seconds(duration)
-        if info and 'video' in info:
+        if info and isinstance(info.get('video'), dict):
             w = info['video'].get('width', 0)
             h = info['video'].get('height', 0)
         else:
@@ -708,12 +709,12 @@ class VideoClipsMainWindow(QMainWindow):
     
     # 菜单和按钮事件处理
     def select_video_files(self):
-        """选择视频文件"""
+        """选择媒体文件（视频/音频）"""
         files, _ = QFileDialog.getOpenFileNames(
             self, 
-            '选择视频文件', 
+            '选择媒体文件（视频/音频）', 
             '', 
-            'Video Files (*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v);;All Files (*)'
+            'Media Files (*.mp4 *.avi *.mov *.mkv *.wmv *.flv *.webm *.m4v *.mp3 *.wav *.m4a *.aac *.flac *.ogg);;All Files (*)'
         )
         
         for file_path in files:
@@ -727,10 +728,14 @@ class VideoClipsMainWindow(QMainWindow):
         """选择文件夹"""
         folder = QFileDialog.getExistingDirectory(self, '选择文件夹')
         if folder:
-            video_extensions = {'.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v'}
+            # 支持视频与常见音频格式
+            media_extensions = {
+                '.mp4', '.avi', '.mov', '.mkv', '.wmv', '.flv', '.webm', '.m4v',
+                '.mp3', '.wav', '.m4a', '.aac', '.flac', '.ogg'
+            }
             for root, dirs, files in os.walk(folder):
                 for file in files:
-                    if os.path.splitext(file)[1].lower() in video_extensions:
+                    if os.path.splitext(file)[1].lower() in media_extensions:
                         file_path = os.path.join(root, file)
                         if file_path not in [item['path'] for item in self.file_items]:
                             info = self._gather_info(file_path)
@@ -994,7 +999,20 @@ class VideoClipsMainWindow(QMainWindow):
             QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
             return
 
-        seg_dur = float(self.split_duration_slider.value())
+        # 优先读取手动输入（分钟），否则使用滑块（秒）
+        minutes_text = (getattr(self, 'split_duration_minutes', QLineEdit('')).text() or '').strip()
+        if minutes_text:
+            try:
+                minutes_val = float(minutes_text)
+                if minutes_val <= 0:
+                    QMessageBox.warning(self, '⚠️ 警告', '手动输入的分钟数需大于 0')
+                    return
+                seg_dur = minutes_val * 60.0
+            except Exception:
+                QMessageBox.warning(self, '⚠️ 警告', '手动输入的分钟数格式不正确，请输入数字，例如 1 或 1.5')
+                return
+        else:
+            seg_dur = float(self.split_duration_slider.value())
         method = self.split_method.currentText()
         try:
             overlap = float(self.split_overlap.text() or '0.0')
@@ -1267,6 +1285,7 @@ class VideoClipsMainWindow(QMainWindow):
         self.create_audio_tab()
         self.create_sliding_tab()
         self.create_stt_tab()
+        self.create_audio_extract_tab()
         
         right_layout.addWidget(self.tab_widget)
         
@@ -1346,10 +1365,9 @@ class VideoClipsMainWindow(QMainWindow):
         """创建切割选项卡"""
         tab = QWidget()
         layout = QVBoxLayout(tab)
-        
-        # 每段时长
+        # 每段时长（支持秒的滑块 + 手动输入分钟）
         duration_layout = QHBoxLayout()
-        duration_layout.addWidget(QLabel('⏰ 每段时长(秒):'))
+        duration_layout.addWidget(QLabel('⏰ 每段时长(秒) 或 手动(分):'))
         self.split_duration_slider = QSlider(Qt.Horizontal)
         self.split_duration_slider.setRange(3, 60)
         self.split_duration_slider.setValue(10)
@@ -1357,13 +1375,20 @@ class VideoClipsMainWindow(QMainWindow):
         duration_layout.addWidget(self.split_duration_slider)
         self.split_duration_label = QLabel('10 秒')
         duration_layout.addWidget(self.split_duration_label)
+        # 手动分钟输入
+        duration_layout.addWidget(QLabel('📝 手动(分):'))
+        self.split_duration_minutes = QLineEdit('')
+        self.split_duration_minutes.setPlaceholderText('例如: 1.5 表示 1分30秒')
+        self.split_duration_minutes.setMaximumWidth(120)
+        duration_layout.addWidget(self.split_duration_minutes)
         layout.addLayout(duration_layout)
         
         # 方法和重叠
         method_layout = QHBoxLayout()
         method_layout.addWidget(QLabel('⚙️ 方法:'))
         self.split_method = QComboBox()
-        self.split_method.addItems(['equal', 'random'])
+        self.split_method.addItems(['ffmpeg', 'equal', 'random'])
+        self.split_method.setCurrentText('ffmpeg')
         method_layout.addWidget(self.split_method)
         
         method_layout.addWidget(QLabel('🔄 重叠(秒):'))
@@ -1713,6 +1738,124 @@ class VideoClipsMainWindow(QMainWindow):
 
         layout.addStretch()
         self.tab_widget.addTab(tab, '🗣️ 语音转文字')
+
+    def create_audio_extract_tab(self):
+        """创建 提取音频 选项卡"""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # 输出格式与参数
+        fmt_row = QHBoxLayout()
+        fmt_row.addWidget(QLabel('🎧 输出格式:'))
+        self.ae_format = QComboBox()
+        self.ae_format.addItems(['mp3', 'wav', 'aac', 'flac', 'ogg'])
+        self.ae_format.setCurrentText('mp3')
+        fmt_row.addWidget(self.ae_format)
+
+        fmt_row.addWidget(QLabel('🔊 比特率(kbps):'))
+        self.ae_bitrate = QLineEdit('192')
+        self.ae_bitrate.setMaximumWidth(80)
+        fmt_row.addWidget(self.ae_bitrate)
+
+        fmt_row.addWidget(QLabel('🎚️ 采样率(Hz):'))
+        self.ae_samplerate = QLineEdit('')
+        self.ae_samplerate.setPlaceholderText('可留空，例如 44100/48000')
+        self.ae_samplerate.setMaximumWidth(120)
+        fmt_row.addWidget(self.ae_samplerate)
+        layout.addLayout(fmt_row)
+
+        # 裁剪时间
+        time_row = QHBoxLayout()
+        time_row.addWidget(QLabel('⏱️ 起始秒:'))
+        self.ae_start = QLineEdit('')
+        self.ae_start.setMaximumWidth(100)
+        time_row.addWidget(self.ae_start)
+
+        time_row.addWidget(QLabel('⏲️ 持续秒:'))
+        self.ae_duration = QLineEdit('')
+        self.ae_duration.setMaximumWidth(100)
+        time_row.addWidget(self.ae_duration)
+        layout.addLayout(time_row)
+
+        # 输出目录
+        out_row = QHBoxLayout()
+        out_row.addWidget(QLabel('📤 输出目录:'))
+        self.ae_output_dir = QLineEdit('video_clips/output/audio')
+        out_row.addWidget(self.ae_output_dir)
+        out_browse = QPushButton('📁 选择')
+        out_browse.clicked.connect(self.browse_ae_output_dir)
+        out_row.addWidget(out_browse)
+        layout.addLayout(out_row)
+
+        # 批量选项
+        self.ae_batch = QCheckBox('🔄 对每个选择文件批量提取')
+        self.ae_batch.setChecked(True)
+        layout.addWidget(self.ae_batch)
+
+        # 开始按钮
+        self.ae_btn = QPushButton('🎧 开始提取音频')
+        self.ae_btn.clicked.connect(self.run_audio_extract)
+        layout.addWidget(self.ae_btn)
+
+        layout.addStretch()
+        self.tab_widget.addTab(tab, '🎧 提取音频')
+
+    def browse_ae_output_dir(self):
+        folder = QFileDialog.getExistingDirectory(self, '📁 选择音频输出目录')
+        if folder:
+            self.ae_output_dir.setText(folder)
+
+    def run_audio_extract(self):
+        files = self.get_selected_files()
+        if not files:
+            QMessageBox.warning(self, '⚠️ 警告', '请先选择视频文件 📽️')
+            return
+
+        fmt = self.ae_format.currentText().lower()
+        try:
+            bitrate_k = int(self.ae_bitrate.text() or '192')
+        except Exception:
+            bitrate_k = 192
+        try:
+            samplerate = int(self.ae_samplerate.text()) if self.ae_samplerate.text().strip() else None
+        except Exception:
+            samplerate = None
+        try:
+            start_sec = float(self.ae_start.text()) if self.ae_start.text().strip() else None
+        except Exception:
+            start_sec = None
+        try:
+            duration_sec = float(self.ae_duration.text()) if self.ae_duration.text().strip() else None
+        except Exception:
+            duration_sec = None
+        out_dir = self.ae_output_dir.text().strip() or 'video_clips/output/audio'
+
+        def work():
+            try:
+                os.makedirs(out_dir, exist_ok=True)
+                total = len(files)
+                for idx, fp in enumerate(files, start=1):
+                    name, _ = os.path.splitext(os.path.basename(fp))
+                    out_path = os.path.join(out_dir, f"{name}.{fmt}")
+                    self._queue.put(('log', f'提取音频: {fp} -> {out_path}'))
+
+                    opt = ExtractOptions(
+                        format=fmt,
+                        bitrate_k=(None if fmt == 'wav' else bitrate_k),
+                        sample_rate=samplerate,
+                        start_sec=start_sec,
+                        duration_sec=duration_sec,
+                    )
+                    result_path = extract_audio(fp, out_path, opt)
+
+                    self._queue.put(('log', f'完成: {result_path}'))
+                    percent = idx / max(1, total) * 100.0
+                    self._queue.put(('progress', (percent, f"完成 {idx}/{total}: {name}")))
+                self._queue.put(('done', None))
+            except Exception:
+                self._queue.put(('error', traceback.format_exc()))
+
+        self._start_worker(work)
 
     def browse_stt_model_dir(self):
         folder = QFileDialog.getExistingDirectory(self, '📁 选择 Whisper 模型目录')
