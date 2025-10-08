@@ -13,3 +13,17 @@ __pycache__/
 video_clips/temp/
 stt/output/
 stt/models/*
+video_clips/build/
+video_clips/dist/
+video_clips/*.spec
+*.egg-info/
+*.egg
+*.log
+*.pot
+*.pyc
+*.pyo
+*.pyd
+*.db
+*.sqlite3
+.DS_Store
+video_clips/release/
