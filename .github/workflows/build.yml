@@ -22,32 +22,30 @@ jobs:
     - name: Install dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install PyQt5>=5.15
+        pip install numpy>=1.21.0
+        pip install Pillow>=8.0.0
+        pip install moviepy>=1.0.3
         pip install pyinstaller>=6.0
+        pip install matplotlib>=3.5.0
+        pip install tqdm>=4.60.0
+    
+    - name: Test Python and PyQt5
+      run: |
+        python -c "import sys; print('Python version:', sys.version)"
+        python -c "import PyQt5; print('PyQt5 imported successfully')"
+        python -c "from PyQt5 import QtCore, QtGui, QtWidgets; print('PyQt5 modules imported')"
     
     - name: Build with PyInstaller
       run: |
         cd video_clips
-        python -m PyInstaller ^
-          --clean ^
-          --noconfirm ^
-          --onedir ^
-          --windowed ^
-          --name "VideoClipsApp" ^
-          --add-data "config;config" ^
-          --add-data "modules;modules" ^
-          --add-data "utils;utils" ^
-          --hidden-import "PyQt5.QtCore" ^
-          --hidden-import "PyQt5.QtGui" ^
-          --hidden-import "PyQt5.QtWidgets" ^
-          --hidden-import "PyQt5.sip" ^
-          --hidden-import "numpy" ^
-          --hidden-import "PIL" ^
-          --hidden-import "PIL.Image" ^
-          --collect-submodules "PyQt5" ^
-          --collect-submodules "numpy" ^
-          --collect-submodules "PIL" ^
-          main_qt5.py
+        python -m PyInstaller --clean --noconfirm --onedir --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL" --collect-submodules "PyQt5" main_qt5.py
+    
+    - name: List build output
+      run: |
+        cd video_clips
+        dir dist
+        if exist dist\VideoClipsApp (dir dist\VideoClipsApp)
     
     - name: Create Release Package
       run: |
@@ -55,7 +53,6 @@ jobs:
         mkdir release
         xcopy /E /I dist\VideoClipsApp release\VideoClipsApp
         echo @echo off > release\run_app.bat
-        echo cd /d "%%~dp0" >> release\run_app.bat
         echo cd VideoClipsApp >> release\run_app.bat
         echo VideoClipsApp.exe >> release\run_app.bat
         echo pause >> release\run_app.bat
@@ -81,37 +78,23 @@ jobs:
     - name: Install system dependencies
       run: |
         sudo apt-get update
-        sudo apt-get install -y python3-pyqt5 python3-pyqt5.qtmultimedia
+        sudo apt-get install -y python3-pyqt5
     
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install -r requirements.txt
+        pip install PyQt5>=5.15
+        pip install numpy>=1.21.0
+        pip install Pillow>=8.0.0
+        pip install moviepy>=1.0.3
         pip install pyinstaller>=6.0
+        pip install matplotlib>=3.5.0
+        pip install tqdm>=4.60.0
     
     - name: Build with PyInstaller
       run: |
         cd video_clips
-        python -m PyInstaller \
-          --clean \
-          --noconfirm \
-          --onedir \
-          --windowed \
-          --name "VideoClipsApp" \
-          --add-data "config:config" \
-          --add-data "modules:modules" \
-          --add-data "utils:utils" \
-          --hidden-import "PyQt5.QtCore" \
-          --hidden-import "PyQt5.QtGui" \
-          --hidden-import "PyQt5.QtWidgets" \
-          --hidden-import "PyQt5.sip" \
-          --hidden-import "numpy" \
-          --hidden-import "PIL" \
-          --hidden-import "PIL.Image" \
-          --collect-submodules "PyQt5" \
-          --collect-submodules "numpy" \
-          --collect-submodules "PIL" \
-          main_qt5.py
+        python -m PyInstaller --clean --noconfirm --onedir --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL" --collect-submodules "PyQt5" main_qt5.py
     
     - name: Create Release Package
       run: |
