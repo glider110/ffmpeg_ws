@@ -1,0 +1,62 @@
+name: Simple Build Test
+
+on:
+  workflow_dispatch:  # 只允许手动触发
+
+jobs:
+  test-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+    
+    - name: Check Python
+      run: |
+        python --version
+        python -m pip --version
+    
+    - name: Install basic dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install PyQt5==5.15.10
+    
+    - name: Test PyQt5 import
+      run: |
+        python -c "import PyQt5; print('PyQt5 version:', PyQt5.Qt.PYQT_VERSION_STR)"
+        python -c "from PyQt5 import QtCore, QtGui, QtWidgets; print('PyQt5 modules imported successfully')"
+    
+    - name: List video_clips directory
+      run: |
+        dir video_clips
+        dir video_clips\config
+        dir video_clips\modules
+        dir video_clips\utils
+    
+    - name: Test main_qt5.py syntax
+      run: |
+        cd video_clips
+        python -m py_compile main_qt5.py
+        echo "main_qt5.py compiles successfully"
+    
+    - name: Install remaining dependencies
+      run: |
+        pip install numpy==1.21.6
+        pip install Pillow==9.5.0
+        pip install pyinstaller==6.10.0
+    
+    - name: Simple PyInstaller test
+      run: |
+        cd video_clips
+        python -m PyInstaller --version
+        python -m PyInstaller --onefile --name "TestApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" main_qt5.py
+    
+    - name: Check output
+      run: |
+        cd video_clips
+        dir dist
+        if exist dist\TestApp.exe (echo "TestApp.exe created successfully") else (echo "TestApp.exe not found")

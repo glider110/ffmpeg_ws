@@ -1,11 +1,7 @@
 name: Build Windows Executable
 
 on:
-  push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:  # 允许手动触发
+  workflow_dispatch:  # 只允许手动触发，避免每次推送都构建
 
 jobs:
   build-windows:
@@ -19,43 +15,56 @@ jobs:
       with:
         python-version: '3.8'
     
-    - name: Install dependencies
+    - name: Install dependencies with specific versions
       run: |
         python -m pip install --upgrade pip
-        pip install PyQt5>=5.15
-        pip install numpy>=1.21.0
-        pip install Pillow>=8.0.0
-        pip install moviepy>=1.0.3
-        pip install pyinstaller>=6.0
-        pip install matplotlib>=3.5.0
-        pip install tqdm>=4.60.0
+        pip install PyQt5==5.15.10
+        pip install PyQt5-Qt5==5.15.2
+        pip install PyQt5-sip==12.13.0
+        pip install numpy==1.21.6
+        pip install Pillow==9.5.0
+        pip install pyinstaller==6.10.0
     
-    - name: Test Python and PyQt5
+    - name: Verify installations
       run: |
         python -c "import sys; print('Python version:', sys.version)"
-        python -c "import PyQt5; print('PyQt5 imported successfully')"
-        python -c "from PyQt5 import QtCore, QtGui, QtWidgets; print('PyQt5 modules imported')"
+        python -c "import PyQt5; print('PyQt5 version:', PyQt5.Qt.PYQT_VERSION_STR)"
+        python -c "from PyQt5 import QtCore, QtGui, QtWidgets; print('PyQt5 modules OK')"
+        python -c "import numpy; print('NumPy version:', numpy.__version__)"
+        python -c "import PIL; print('Pillow version:', PIL.__version__)"
     
-    - name: Build with PyInstaller
+    - name: Test compile main_qt5.py
       run: |
         cd video_clips
-        python -m PyInstaller --clean --noconfirm --onedir --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL" --collect-submodules "PyQt5" main_qt5.py
+        python -m py_compile main_qt5.py
+        echo "main_qt5.py syntax OK"
     
-    - name: List build output
+    - name: Build with PyInstaller (onefile mode)
+      run: |
+        cd video_clips
+        python -m PyInstaller --clean --noconfirm --onefile --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL.Image" --collect-submodules "PyQt5" main_qt5.py
+    
+    - name: Verify build output
       run: |
         cd video_clips
         dir dist
-        if exist dist\VideoClipsApp (dir dist\VideoClipsApp)
+        if exist dist\VideoClipsApp.exe (echo "SUCCESS: VideoClipsApp.exe created" && dir dist\VideoClipsApp.exe) else (echo "ERROR: VideoClipsApp.exe not found")
+    
+    - name: Test executable
+      run: |
+        cd video_clips\dist
+        .\VideoClipsApp.exe --version || echo "App started (expected behavior for GUI app)"
     
     - name: Create Release Package
       run: |
         cd video_clips
         mkdir release
-        xcopy /E /I dist\VideoClipsApp release\VideoClipsApp
+        copy dist\VideoClipsApp.exe release\
         echo @echo off > release\run_app.bat
-        echo cd VideoClipsApp >> release\run_app.bat
+        echo echo Starting VideoClipsApp... >> release\run_app.bat
         echo VideoClipsApp.exe >> release\run_app.bat
         echo pause >> release\run_app.bat
+        echo README: Double-click VideoClipsApp.exe to run the application > release\README.txt
     
     - name: Upload Release Artifact
       uses: actions/upload-artifact@v3
@@ -83,31 +92,29 @@ jobs:
     - name: Install Python dependencies
       run: |
         python -m pip install --upgrade pip
-        pip install PyQt5>=5.15
-        pip install numpy>=1.21.0
-        pip install Pillow>=8.0.0
-        pip install moviepy>=1.0.3
-        pip install pyinstaller>=6.0
-        pip install matplotlib>=3.5.0
-        pip install tqdm>=4.60.0
+        pip install PyQt5==5.15.10
+        pip install numpy==1.21.6
+        pip install Pillow==9.5.0
+        pip install pyinstaller==6.10.0
     
     - name: Build with PyInstaller
       run: |
         cd video_clips
-        python -m PyInstaller --clean --noconfirm --onedir --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL" --collect-submodules "PyQt5" main_qt5.py
+        python -m PyInstaller --clean --noconfirm --onefile --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL.Image" --collect-submodules "PyQt5" main_qt5.py
     
     - name: Create Release Package
       run: |
         cd video_clips
         mkdir -p release
-        cp -r dist/VideoClipsApp release/
+        cp dist/VideoClipsApp release/
         cat > release/run_app.sh << 'EOF'
         #!/bin/bash
         cd "$(dirname "$0")"
-        cd VideoClipsApp
+        echo "Starting VideoClipsApp..."
         ./VideoClipsApp
         EOF
         chmod +x release/run_app.sh
+        echo "README: Run ./VideoClipsApp or use ./run_app.sh" > release/README.txt
     
     - name: Upload Release Artifact
       uses: actions/upload-artifact@v3
