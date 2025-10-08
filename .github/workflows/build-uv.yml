@@ -1,0 +1,121 @@
+name: Build with UV Dependencies
+
+on:
+  workflow_dispatch:  # 手动触发
+
+jobs:
+  build-windows:
+    runs-on: windows-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+    
+    - name: Install UV
+      run: |
+        python -m pip install --upgrade pip
+        pip install uv
+    
+    - name: Install dependencies using UV (from pyproject.toml)
+      run: |
+        uv sync --frozen
+    
+    - name: Verify installations
+      run: |
+        uv run python -c "import sys; print('Python version:', sys.version)"
+        uv run python -c "import PyQt5; print('PyQt5 imported successfully')"
+        uv run python -c "from PyQt5 import QtCore, QtGui, QtWidgets; print('PyQt5 modules OK')"
+        uv run python -c "import numpy; print('NumPy version:', numpy.__version__)"
+        uv run python -c "import PIL; print('Pillow version:', PIL.__version__)"
+    
+    - name: Test compile main_qt5.py
+      run: |
+        cd video_clips
+        uv run python -m py_compile main_qt5.py
+        echo "main_qt5.py syntax OK"
+    
+    - name: Build with PyInstaller using UV environment
+      run: |
+        cd video_clips
+        uv run python -m PyInstaller --clean --noconfirm --onefile --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL.Image" --collect-submodules "PyQt5" main_qt5.py
+    
+    - name: Verify build output
+      run: |
+        cd video_clips
+        dir dist
+        if exist dist\VideoClipsApp.exe (echo "SUCCESS: VideoClipsApp.exe created" && dir dist\VideoClipsApp.exe) else (echo "ERROR: VideoClipsApp.exe not found")
+    
+    - name: Create Release Package
+      run: |
+        cd video_clips
+        mkdir release
+        copy dist\VideoClipsApp.exe release\
+        echo @echo off > release\run_app.bat
+        echo echo Starting VideoClipsApp... >> release\run_app.bat
+        echo VideoClipsApp.exe >> release\run_app.bat
+        echo pause >> release\run_app.bat
+        echo UV Dependencies Build - VideoClipsApp Windows Executable > release\README.txt
+        echo Double-click VideoClipsApp.exe to run the application >> release\README.txt
+    
+    - name: Upload Release Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: VideoClipsApp-Windows-UV
+        path: video_clips/release/
+        retention-days: 30
+
+  build-linux:
+    runs-on: ubuntu-latest
+    
+    steps:
+    - uses: actions/checkout@v4
+    
+    - name: Set up Python
+      uses: actions/setup-python@v4
+      with:
+        python-version: '3.8'
+    
+    - name: Install system dependencies
+      run: |
+        sudo apt-get update
+        sudo apt-get install -y python3-pyqt5
+    
+    - name: Install UV
+      run: |
+        python -m pip install --upgrade pip
+        pip install uv
+    
+    - name: Install dependencies using UV (from pyproject.toml)
+      run: |
+        uv sync --frozen
+    
+    - name: Build with PyInstaller using UV environment
+      run: |
+        cd video_clips
+        uv run python -m PyInstaller --clean --noconfirm --onefile --name "VideoClipsApp" --hidden-import "PyQt5.QtCore" --hidden-import "PyQt5.QtGui" --hidden-import "PyQt5.QtWidgets" --hidden-import "PyQt5.sip" --hidden-import "numpy" --hidden-import "PIL.Image" --collect-submodules "PyQt5" main_qt5.py
+    
+    - name: Create Release Package
+      run: |
+        cd video_clips
+        mkdir -p release
+        cp dist/VideoClipsApp release/
+        cat > release/run_app.sh << 'EOF'
+        #!/bin/bash
+        cd "$(dirname "$0")"
+        echo "Starting VideoClipsApp..."
+        ./VideoClipsApp
+        EOF
+        chmod +x release/run_app.sh
+        echo "UV Dependencies Build - VideoClipsApp Linux Executable" > release/README.txt
+        echo "Run ./VideoClipsApp or use ./run_app.sh" >> release/README.txt
+    
+    - name: Upload Release Artifact
+      uses: actions/upload-artifact@v3
+      with:
+        name: VideoClipsApp-Linux-UV
+        path: video_clips/release/
+        retention-days: 30
